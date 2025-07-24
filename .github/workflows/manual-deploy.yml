@@ -14,10 +14,6 @@ on:
         required: true
         type: string
   push:
-    paths:
-      - '.github/workflows/manual-deploy.yml'
-    branches-ignore:
-      - '**'  # Prevents actual trigger on push, but makes workflow visible
 
 jobs:
   deploy:
