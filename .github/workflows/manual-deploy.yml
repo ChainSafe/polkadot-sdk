@@ -1,0 +1,78 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build and deploy'
+        required: true
+        default: 'master'
+      target_server:
+        description: 'Target server for deployment'
+        required: true
+        type: string
+
+jobs:
+  test-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: List directory contents
+        run: |
+          echo "Current branch: ${{ inputs.branch }}"
+          echo "Listing repository contents:"
+          ls -la
+          
+      - name: Show git info
+        run: |
+          git branch
+          git status
+          
+      - name: Show git info
+        run: |
+          git branch
+          git status
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save Docker image
+        run: |
+          docker save ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} > polkadot-node.tar
+
+      - name: Deploy to server
+        env:
+          TARGET_SERVER: ${{ inputs.target_server }}
+          DOCKER_IMAGE_TAR: polkadot-node.tar
+        run: |
+          # Install SSH client
+          sudo apt-get update && sudo apt-get install -y openssh-client
+
+          # Setup SSH key from secrets
+          eval $(ssh-agent -s)
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          # Copy Docker image to target server
+          scp -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $DOCKER_IMAGE_TAR $TARGET_SERVER:~/
+
+          # Load and run Docker image on target server
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $TARGET_SERVER << 'EOF'
+            docker load < ~/polkadot-node.tar
+            docker stop polkadot-node || true
+            docker rm polkadot-node || true
+            docker run -d \
+              --name polkadot-node \
+              --restart unless-stopped \
+              -p 30333:30333 \
+              -p 9933:9933 \
+              -p 9944:9944 \
+              ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
+            rm ~/polkadot-node.tar
+EOF
