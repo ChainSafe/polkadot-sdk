@@ -23,37 +23,31 @@ jobs:
         with:
           ref: ${{ inputs.source_branch }}
 
+      - name: List branch contents
+        run: |
+          echo "Contents of ${{ inputs.source_branch }} branch:"
+          ls -la
+          git status
+          git branch
+          
       - name: Check remote server
         env:
           TARGET_SERVER: devops@${{ inputs.target_server }}
-        run: |
-          eval $(ssh-agent -s)
-          echo "${{ secrets.CICD_SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
-
-          ssh -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              $TARGET_SERVER << 'EOF'
-            echo "Starting deployment from ${{ inputs.source_branch }}"
-            docker ps
-EOF
-
-          ssh -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              $TARGET_SERVER << 'EOF'
-            echo "Starting deployment from ${{ inputs.source_branch }}"
-            docker ps
-EOF
         run: |
           # Setup SSH key
           eval $(ssh-agent -s)
           echo "${{ secrets.CICD_SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
 
-          # Connect and run docker ps
+          # Connect and check server
           ssh -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               $TARGET_SERVER << 'EOF'
-            echo "Checking Docker containers..."
+            echo "Starting deployment from ${{ inputs.source_branch }}"
             docker ps
             echo "Done checking containers"
+          EOF
+              $TARGET_SERVER << 'EOF'
+            echo "Starting deployment from ${{ inputs.source_branch }}"
+            docker ps
           EOF
 
