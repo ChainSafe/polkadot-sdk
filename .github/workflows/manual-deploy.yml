@@ -6,15 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       source_branch:
-        description: 'Source branch to deploy from (e.g. master, dev)'
+        description: 'Source branch to deploy from (e.g. master, feat1)'
         required: true
         default: 'master'
       target_server:
         description: 'Target server for deployment'
         required: true
-        default: '145.239.2.149'
         type: string
-  push:
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
