@@ -1,0 +1,59 @@
+# Note: Workflows must be in the default branch to appear in Actions tab
+# To make it visible in other branches, we need to add path filters
+name: Deploy from Source Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: 'Source branch to deploy from (e.g. master, dev)'
+        required: true
+        default: 'master'
+      target_server:
+        description: 'Target server for deployment'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_branch }}
+
+      - name: Check remote server
+        env:
+          TARGET_SERVER: devops@${{ inputs.target_server }}
+        run: |
+          eval $(ssh-agent -s)
+          echo "${{ secrets.CICD_SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $TARGET_SERVER << 'EOF'
+            echo "Starting deployment from ${{ inputs.source_branch }}"
+            docker ps
+EOF
+
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $TARGET_SERVER << 'EOF'
+            echo "Starting deployment from ${{ inputs.source_branch }}"
+            docker ps
+EOF
+        run: |
+          # Setup SSH key
+          eval $(ssh-agent -s)
+          echo "${{ secrets.CICD_SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          # Connect and run docker ps
+          ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              $TARGET_SERVER << 'EOF'
+            echo "Checking Docker containers..."
+            docker ps
+            echo "Done checking containers"
+          EOF
+
