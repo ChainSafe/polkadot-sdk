@@ -1,3 +1,5 @@
+# Note: Workflows must be in the default branch to appear in Actions tab
+# To make it visible in other branches, we need to add path filters
 name: Manual Deploy
 
 on:
@@ -11,6 +13,12 @@ on:
         description: 'Target server for deployment'
         required: true
         type: string
+  # Add path trigger to make workflow visible in non-default branches
+  push:
+    # paths:
+    #   - '.github/workflows/manual-deploy.yml'
+    branches:
+      - 'hamid-test-code'
 
 jobs:
   test-checkout:
