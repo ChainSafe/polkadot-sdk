@@ -1,6 +1,6 @@
 # Note: Workflows must be in the default branch to appear in Actions tab
 # To make it visible in other branches, we need to add path filters
-name: Deploy from Source Branch
+name: Deploy
 
 on:
   workflow_dispatch:
@@ -12,8 +12,9 @@ on:
       target_server:
         description: 'Target server for deployment'
         required: true
+        default: '145.239.2.149'
         type: string
-  
+  push:
 jobs:
   deploy:
     runs-on: ubuntu-latest
