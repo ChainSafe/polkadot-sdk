@@ -5,8 +5,9 @@ name: Docker CI
 on:
   push:
     branches:
-      - 'feat/**'  # Run only on branches starting with 'feat/'
-      - 'hamid*'    # Also catch branches like 'feat-123'
+      - '**'  # Run only on branches starting with 'feat/'
+  workflow_call: # Allow workflow to be called from other workflows
+  workflow_dispatch: # Allow manual triggers from any branch
 
 jobs:
   build:
