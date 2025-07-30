@@ -233,12 +233,16 @@ impl Requester {
 					)?;
 
 					let task_cfg = FetchTaskConfig::new(
-						leaf,
-						&core,
+						core.candidate_hash,
+						core.group_responsible,
 						tx,
+						// &core,
 						metrics,
 						session_info,
 						chunk_index,
+						Some(leaf),
+						Some(core.candidate_descriptor.relay_parent()),
+						Some(core.candidate_descriptor.erasure_root()),
 						self.req_protocol_names.get_name(v1::ChunkFetchingRequest::PROTOCOL),
 						self.req_protocol_names.get_name(v2::ChunkFetchingRequest::PROTOCOL),
 					);

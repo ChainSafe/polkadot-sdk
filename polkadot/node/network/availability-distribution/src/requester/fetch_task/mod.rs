@@ -35,7 +35,7 @@ use polkadot_node_subsystem::{
 	overseer,
 };
 use polkadot_primitives::{
-	vstaging::OccupiedCore, AuthorityDiscoveryId, BlakeTwo256, CandidateHash, ChunkIndex,
+	/*vstaging::OccupiedCore,*/ AuthorityDiscoveryId, BlakeTwo256, CandidateHash, ChunkIndex,
 	GroupIndex, Hash, HashT, SessionIndex,
 };
 use sc_network::ProtocolName;
@@ -117,10 +117,12 @@ struct RunningTask {
 	request: v2::ChunkFetchingRequest,
 
 	/// Root hash, for verifying the chunks validity.
-	erasure_root: Hash,
+	/// TODO: update comment after making this optional
+	erasure_root: Option<Hash>,
 
 	/// Relay parent of the candidate to fetch.
-	relay_parent: Hash,
+	/// TODO: update comment after making this optional
+	relay_parent: Option<Hash>,
 
 	/// Sender for communicating with other subsystems and reporting results.
 	sender: mpsc::Sender<FromFetchTask>,
@@ -144,34 +146,41 @@ impl FetchTaskConfig {
 	///
 	/// The result of this function can be passed into [`FetchTask::start`].
 	pub fn new(
-		leaf: Hash,
-		core: &OccupiedCore,
+		candidate_hash: CandidateHash,
+		// core: &OccupiedCore,
+		group_index: GroupIndex,
 		sender: mpsc::Sender<FromFetchTask>,
 		metrics: Metrics,
 		session_info: &SessionInfo,
 		chunk_index: ChunkIndex,
+		leaf: Option<Hash>,
+		relay_parent: Option<Hash>,
+		erasure_root: Option<Hash>,
 		req_v1_protocol_name: ProtocolName,
 		req_v2_protocol_name: ProtocolName,
 	) -> Self {
-		let live_in = vec![leaf].into_iter().collect();
+		let live_in = match leaf {
+			Some(leaf) => vec![leaf].into_iter().collect(),
+			None => HashSet::new(),
+		};
 
 		// Don't run tasks for our backing group:
-		if session_info.our_group == Some(core.group_responsible) {
+		if session_info.our_group == Some(group_index) { //core.group_responsible) {
 			return FetchTaskConfig { live_in, prepared_running: None }
 		}
 
 		let prepared_running = RunningTask {
 			session_index: session_info.session_index,
-			group_index: core.group_responsible,
-			group: session_info.validator_groups.get(core.group_responsible.0 as usize)
+			group_index, //core.group_responsible,
+			group: session_info.validator_groups.get(group_index.0 as usize) //core.group_responsible.0 as usize)
 				.expect("The responsible group of a candidate should be available in the corresponding session. qed.")
 				.clone(),
 			request: v2::ChunkFetchingRequest {
-				candidate_hash: core.candidate_hash,
+				candidate_hash, //: core.candidate_hash,
 				index: session_info.our_index,
 			},
-			erasure_root: core.candidate_descriptor.erasure_root(),
-			relay_parent: core.candidate_descriptor.relay_parent(),
+			erasure_root, //: core.candidate_descriptor.erasure_root(),
+			relay_parent, //: core.candidate_descriptor.relay_parent(),
 			metrics,
 			sender,
 			chunk_index,
@@ -222,6 +231,8 @@ impl FetchTask {
 
 	/// Whether there are still relay parents around with this candidate pending
 	/// availability.
+	/// FIXME: task is live under speculative availability before a leaf has been added to
+	/// `live_in`.
 	pub fn is_live(&self) -> bool {
 		!self.live_in.is_empty()
 	}
@@ -310,14 +321,23 @@ impl RunningTask {
 				},
 			};
 
-			// Data genuine?
-			if !self.validate_chunk(&validator, &chunk, self.chunk_index) {
-				bad_validators.push(validator);
-				continue
+			if let Some(erasure_root) = self.erasure_root {
+				// Data genuine?
+				if !self.validate_chunk(&validator, &chunk, self.chunk_index, &erasure_root) {
+					bad_validators.push(validator);
+					continue
+				}
+
+				// Ok, let's store it and be happy:
+				self.store_chunk(chunk).await;
+			} else {
+				// TODO: Figure out how to validate and store the chunk later.
+				// Maybe move the validation code into subsystem and store speculatively fetched
+				// chunks separately. On active leaves update, fetch erasure root via
+				// occupied cores -> candidate descriptor and validate chunk. If chunk is invalid,
+				// start another, non-speculative fetch task.😅
 			}
 
-			// Ok, let's store it and be happy:
-			self.store_chunk(chunk).await;
 			succeeded = true;
 			break
 		}
@@ -473,6 +493,7 @@ impl RunningTask {
 		validator: &AuthorityDiscoveryId,
 		chunk: &ErasureChunk,
 		expected_chunk_index: ChunkIndex,
+		erasure_root: &Hash,
 	) -> bool {
 		if chunk.index != expected_chunk_index {
 			gum::warn!(
@@ -486,7 +507,7 @@ impl RunningTask {
 			return false
 		}
 		let anticipated_hash =
-			match branch_hash(&self.erasure_root, chunk.proof(), chunk.index.0 as usize) {
+			match branch_hash(erasure_root, chunk.proof(), chunk.index.0 as usize) {
 				Ok(hash) => hash,
 				Err(e) => {
 					gum::warn!(
