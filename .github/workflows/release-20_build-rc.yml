@@ -1,0 +1,175 @@
+name: Docker Build & Deploy from non-default branch
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      # CI inputs
+      branch:
+        description: 'CI - Branch to build from'
+        required: true
+        default: 'master'
+        type: string
+      build-cmd:
+        description: 'CI - build command'
+        required: true
+        type: string
+        default: 'cargo build --locked --release -p polkadot'
+      # CD inputs
+      chain:
+        description: 'CD - Select the chain to deploy'
+        required: true
+        default: 'polkadot'
+        type: choice
+        options:
+          - paseo
+          - westend
+          - polkadot
+      instance:
+        description: 'CD - Instance to deploy to'
+        required: true
+        default: ''
+        type: choice 
+        options:
+          - "hetzner-parity-westend-0 65.109.50.246"
+          - "hetzner-parity-westend-1 65.109.58.186"
+          - "hetzner-parity-paseo-0 65.109.48.170"
+          - "hetzner-parity-paseo-1 65.108.239.41"
+          - "hetzner-parity-polkadot-0 65.109.21.230"
+          - "145.239.2.149 145.239.2.149" # TEMP
+      extra_args:
+        description: 'CD - Extra arguments for Parity node'
+        required: false
+        default: '--state-pruning 256 --blocks-pruning 256 --database rocksdb'
+        type: string
+
+env:
+  DOCKERHUB_USERNAME: chainsafeinfra
+  DOCKERHUB_REPO: parity
+  DOCKERFILE_PATH: ./polkadot_builder.Dockerfile
+  DOCKER_COMPOSE_FILE: ./docker-compose.yml
+  REMOTE_USER: devops
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.image_tag }}
+    steps:
+      - name: Print workflow inputs
+        run: |
+          echo "running from non-default branch ${{ github.ref }}"
+          echo "branch: ${{ github.event.inputs.branch }}"
+          echo "build-cmd: ${{ github.event.inputs.build-cmd }}"
+          echo "chain: ${{ github.event.inputs.chain }}"
+          echo "instance: ${{ github.event.inputs.instance }}"
+          echo "extra_args: ${{ github.event.inputs.extra_args }}"
+      # Checkout the specified branch
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # with:
+        #   ref: ${{ github.event.inputs.branch }}
+
+      # Verify checkout TEMP
+      - name: Verify branch checkout
+        run: |
+          echo "show disk" 
+          df -h
+          echo "Current branch and commit:"
+          git status
+          git log -1 --oneline
+          echo "Directory contents:"
+          ls -lah
+
+      # Login to Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      # Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Set Docker image tag
+      - name: Set Docker image tag
+        id: set_tag
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          # Replace slashes in branch name to avoid invalid tag names
+          SAFE_BRANCH=$(echo "${{ github.event.inputs.branch }}" | tr '/' '-')
+          TAG="${SAFE_BRANCH}-${SHORT_SHA}"
+          echo "image_tag=${{ env.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPO }}:${TAG}" >> $GITHUB_OUTPUT
+
+      # Build and push Docker image
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE_PATH }}
+          push: true
+          tags: ${{ steps.set_tag.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            TARGET_REPO=https://github.com/hamidmuslih/polkadot-sdk.git
+            TARGET_BRANCH=${{ github.event.inputs.branch }}
+            CARGO_BUILD_CMD=${{ github.event.inputs.build-cmd }}
+
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      # Checkout the specified branch
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CICD_PRIVATE_KEY }}
+
+      - name: Extract instance name, IP, and index
+        id: extract_instance
+        run: |
+          INSTANCE_INPUT="${{ github.event.inputs.instance }}"
+          INSTANCE_NAME=$(echo "$INSTANCE_INPUT" | awk '{print $1}')
+          INSTANCE_IP=$(echo "$INSTANCE_INPUT" | awk '{print $2}')
+          # Extract index (last part after last dash)
+          INSTANCE_INDEX=$(echo "$INSTANCE_NAME" | awk -F'-' '{print $NF}')
+          echo "name=$INSTANCE_NAME" >> $GITHUB_OUTPUT
+          echo "ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+          echo "index=$INSTANCE_INDEX" >> $GITHUB_OUTPUT
+
+      - name: Prepare docker-compose file with workflow inputs
+        run: |
+          export IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          export REMOTE_USER="${{ env.REMOTE_USER }}"
+          export CHAIN="${{ github.event.inputs.chain }}"
+          export INSTANCE="${{ steps.extract_instance.outputs.name }}"
+          export INDEX="${{ steps.extract_instance.outputs.index }}"
+          export EXTRA_ARGS="${{ github.event.inputs.extra_args }}"
+          envsubst < ${{ env.DOCKER_COMPOSE_FILE }} > ./custom-docker-compose.final.yml
+          #temp
+          cat ./custom-docker-compose.final.yml
+
+      - name: Copy docker-compose file to remote server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.REMOTE_USER }}@${{ steps.extract_instance.outputs.ip }} "mkdir -p /home/${{ env.REMOTE_USER }}/parity-data/data"
+          scp -o StrictHostKeyChecking=no ./custom-docker-compose.final.yml ${{ env.REMOTE_USER }}@${{ steps.extract_instance.outputs.ip }}:/home/${{ env.REMOTE_USER }}/parity-data/docker-compose.yml
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.REMOTE_USER }}@${{ steps.extract_instance.outputs.ip }} "
+            docker pull ${{ needs.build-and-push.outputs.image_tag }} &&
+            cd /home/${{ env.REMOTE_USER }}/parity-data/
+            docker compose -f docker-compose.yml down || true &&
+            docker compose -f docker-compose.yml up -d
+          "
+
+
+
