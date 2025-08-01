@@ -20,9 +20,6 @@ FROM docker.io/paritytech/base-bin:latest
 LABEL description="Multistage Docker image for Polkadot: a platform for web3" \
     io.parity.image.type="builder" \
     io.parity.image.authors="devops@chainsafe.io" \
-    io.parity.image.vendor="Parity Technologies" \
-    io.parity.image.description="Polkadot: a platform for web3" \
-    io.parity.image.documentation="https://github.com/paritytech/polkadot-sdk/"
 
 COPY --from=builder /polkadot/target/release/polkadot /usr/local/bin
 
@@ -31,9 +28,6 @@ RUN useradd -m -u 1001 -U -s /bin/sh -d /polkadot polkadot && \
     mkdir -p /data /polkadot/.local/share && \
     chown -R polkadot:polkadot /data && \
     ln -s /data /polkadot/.local/share/polkadot && \
-# unclutter and minimize the attack surface
-    # rm -rf /usr/bin /usr/sbin && \
-# check if executable works in this container
     /usr/local/bin/polkadot --version
 
 USER polkadot

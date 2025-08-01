@@ -29,6 +29,7 @@ services:
       options:
         max-file: '5'
         max-size: '100m'
+    # Labels for Promtail and prometheus
     labels:
       promtail_logging: "true"
       instance: "${INSTANCE}"

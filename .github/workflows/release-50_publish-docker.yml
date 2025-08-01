@@ -26,7 +26,7 @@ on:
           - westend
           - polkadot
       instance:
-        description: 'CD - Instance to deploy to'
+        description: 'CD - Server to deploy to'
         required: true
         default: ''
         type: choice 
@@ -67,19 +67,6 @@ jobs:
       # Checkout the specified branch
       - name: Checkout code
         uses: actions/checkout@v4
-        # with:
-        #   ref: ${{ github.event.inputs.branch }}
-
-      # Verify checkout TEMP
-      - name: Verify branch checkout
-        run: |
-          echo "show disk" 
-          df -h
-          echo "Current branch and commit:"
-          git status
-          git log -1 --oneline
-          echo "Directory contents:"
-          ls -lah
 
       # Login to Docker Hub
       - name: Login to Docker Hub
@@ -113,7 +100,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            TARGET_REPO=https://github.com/hamidmuslih/polkadot-sdk.git
+            TARGET_REPO=https://github.com/chainsafe/polkadot-sdk.git
             TARGET_BRANCH=${{ github.event.inputs.branch }}
             CARGO_BUILD_CMD=${{ github.event.inputs.build-cmd }}
 
