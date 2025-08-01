@@ -1,4 +1,4 @@
-name: Docker Build & Deploy from non-default branch
+name: Docker Build & Deploy (Chainsafe)
 
 
 on:
