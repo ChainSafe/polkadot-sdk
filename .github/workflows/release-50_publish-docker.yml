@@ -112,7 +112,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
+          ref: ${{ github.event.ref }}
 
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -122,6 +122,8 @@ jobs:
       - name: Extract instance name, IP, and index
         id: extract_instance
         run: |
+          pwd 
+          ls -la
           INSTANCE_INPUT="${{ github.event.inputs.instance }}"
           INSTANCE_NAME=$(echo "$INSTANCE_INPUT" | awk '{print $1}')
           INSTANCE_IP=$(echo "$INSTANCE_INPUT" | awk '{print $2}')
