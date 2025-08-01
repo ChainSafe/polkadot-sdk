@@ -19,7 +19,7 @@ FROM docker.io/paritytech/base-bin:latest
 
 LABEL description="Multistage Docker image for Polkadot: a platform for web3" \
     io.parity.image.type="builder" \
-    io.parity.image.authors="devops@chainsafe.io" \
+    io.parity.image.authors="devops@chainsafe.io"
 
 COPY --from=builder /polkadot/target/release/polkadot /usr/local/bin
 
