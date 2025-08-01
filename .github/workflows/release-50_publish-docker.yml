@@ -109,7 +109,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
-      # Checkout the specified branch
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -118,7 +117,7 @@ jobs:
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.CICD_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.CICD_SSH_KEY }}
 
       - name: Extract instance name, IP, and index
         id: extract_instance
