@@ -898,6 +898,10 @@ struct State {
 	per_block_assignments_gathering_times:
 		LruMap<BlockNumber, HashMap<(Hash, CandidateHash), AssignmentGatheringRecord>>,
 	no_show_stats: NoShowStats,
+
+	// amount of approvals usage per epoch per validator index
+	// where the ith index in the vector corresponds to the
+	approvals_usage: HashMap<SessionIndex, HashMap<ValidatorIndex, usize>>,
 }
 
 // Regularly dump the no-show stats at this block number frequency.
@@ -1257,6 +1261,7 @@ where
 			MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 		)),
 		no_show_stats: NoShowStats::default(),
+		approvals_usage: HashMap::new(),
 	};
 
 	let mut last_finalized_height: Option<BlockNumber> = {
@@ -2985,6 +2990,21 @@ where
 		.await;
 		actions.extend(new_actions);
 	}
+
+	let block_entry = match db.load_block_entry(&approval.block_hash)? {
+		Some(b) => b,
+		None => {
+			respond_early!(ApprovalCheckResult::Bad(ApprovalCheckError::UnknownBlock(
+				approval.block_hash
+			),))
+		},
+	};
+
+	*state.approvals_usage
+		.get_mut(&block_entry.session())
+		.unwrap()
+		.entry(approval.validator)
+		.or_insert(0) += approval.candidate_indices.count_ones();
 
 	// importing the approval can be heavy as it may trigger acceptance for a series of blocks.
 	Ok((actions, ApprovalCheckResult::Accepted))

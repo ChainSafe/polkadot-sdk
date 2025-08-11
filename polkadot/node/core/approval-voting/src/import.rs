@@ -341,7 +341,7 @@ pub(crate) async fn handle_new_head<
 >(
 	sender: &mut Sender,
 	approval_voting_sender: &mut AVSender,
-	state: &State,
+	state: &mut State,
 	db: &mut OverlayedBackend<'_, B>,
 	session_info_provider: &mut RuntimeInfo,
 	head: Hash,
@@ -454,6 +454,10 @@ pub(crate) async fn handle_new_head<
 			slot,
 			force_approve,
 		} = imported_block_info;
+
+		state.approvals_usage
+			.entry(session_index)
+			.or_insert(HashMap::with_capacity(n_validators));
 
 		let session_info =
 			match get_session_info(session_info_provider, sender, head, session_index).await {
@@ -663,6 +667,7 @@ pub(crate) mod tests {
 				MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 			)),
 			no_show_stats: Default::default(),
+			approvals_usage: Default::default(),
 		}
 	}
 
@@ -1356,7 +1361,7 @@ pub(crate) mod tests {
 			.map(|(r, c, g)| CandidateEvent::CandidateIncluded(r, Vec::new().into(), c, g))
 			.collect::<Vec<_>>();
 
-		let (state, mut session_info_provider) = single_session_state();
+		let (mut state, mut session_info_provider) = single_session_state();
 		overlay_db.write_block_entry(
 			v3::BlockEntry {
 				block_hash: parent_hash,
@@ -1385,7 +1390,7 @@ pub(crate) mod tests {
 				let result = handle_new_head(
 					ctx.sender(),
 					&mut approval_voting_sender,
-					&state,
+					&mut state,
 					&mut overlay_db,
 					&mut session_info_provider,
 					hash,
