@@ -911,7 +911,7 @@ pub struct ApprovalTallyLine {
 	/// Approvals by this validator which our approvals gadget used in marking candidates approved.
 	approval_usages: u32,
 }
-struct ApprovalsTally(Vec<ApprovalTallyLine>);
+struct ApprovalsTally((SessionIndex, Vec<ApprovalTallyLine>));
 
 // Regularly dump the no-show stats at this block number frequency.
 const NO_SHOW_DUMP_FREQUENCY: BlockNumber = 50;
@@ -1192,9 +1192,9 @@ impl State {
 		}
 	}
 
-	fn compute_approvals_tallies(&mut self, session_index: SessionIndex) -> Vec<ApprovalTallyLine> {
+	fn compute_approvals_tallies(&mut self, session_index: SessionIndex) -> ApprovalsTally {
 		match self.approvals_usage.get(&session_index) {
-			None => return vec![],
+			None => return ApprovalsTally((session_index, vec![])),
 			Some((approvals_usage, n_validators)) => {
 				let mut approvals_tallies: Vec<ApprovalTallyLine> = vec![ApprovalTallyLine::default(); *n_validators];
 				approvals_usage.iter().for_each(|(validator_index, usage)| {
@@ -1203,7 +1203,7 @@ impl State {
 					}
 				});
 
-				return approvals_tallies;
+				return ApprovalsTally((session_index, approvals_tallies));
 			}
 		}
 	}

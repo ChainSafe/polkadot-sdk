@@ -5869,6 +5869,7 @@ fn test_computes_approvals_tallies_correctly() {
 
 	let tallies = state.compute_approvals_tallies(SessionIndex::from(5_u32));
 
-	assert_eq!(tallies.get(0).unwrap(), &ApprovalTallyLine{approval_usages: 10});
-	assert_eq!(tallies.get(1).unwrap(), &ApprovalTallyLine{approval_usages: 8});
+	assert_eq!(tallies.0, SessionIndex::from(5_u32));
+	assert_eq!(tallies.1.get(0).unwrap(), &ApprovalTallyLine{approval_usages: 10});
+	assert_eq!(tallies.1.get(1).unwrap(), &ApprovalTallyLine{approval_usages: 8});
 }
