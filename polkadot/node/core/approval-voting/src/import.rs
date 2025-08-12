@@ -457,7 +457,7 @@ pub(crate) async fn handle_new_head<
 
 		state.approvals_usage
 			.entry(session_index)
-			.or_insert(HashMap::with_capacity(n_validators));
+			.or_insert((HashMap::with_capacity(n_validators), n_validators));
 
 		let session_info =
 			match get_session_info(session_info_provider, sender, head, session_index).await {
@@ -657,7 +657,7 @@ pub(crate) mod tests {
 		}
 	}
 
-	fn blank_state() -> State {
+	pub fn blank_state() -> State {
 		State {
 			keystore: Arc::new(LocalKeystore::in_memory()),
 			slot_duration_millis: 6_000,
@@ -667,6 +667,7 @@ pub(crate) mod tests {
 				MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 			)),
 			no_show_stats: Default::default(),
+			last_session_index: None,
 			approvals_usage: Default::default(),
 		}
 	}

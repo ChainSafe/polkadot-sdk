@@ -85,7 +85,7 @@ use std::{
 	sync::Arc,
 	time::Duration,
 };
-
+use std::collections::btree_map::Entry;
 use schnellru::{ByLength, LruMap};
 
 use approval_checking::RequiredTranches;
@@ -902,17 +902,16 @@ struct State {
 
 	// amount of approvals usage per epoch per validator index
 	// where the ith index in the vector corresponds to the
-	approvals_usage: HashMap<SessionIndex, HashMap<ValidatorIndex, usize>>,
+	approvals_usage: HashMap<SessionIndex, (HashMap<ValidatorIndex, usize>, usize)>,
 }
 
-struct ApprovalsTally(Vec<ApprovalsTallyLine>);
-
 /// Our subjective record of what we used from some other validator on the finalized chain
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ApprovalTallyLine {
 	/// Approvals by this validator which our approvals gadget used in marking candidates approved.
 	approval_usages: u32,
 }
-
+struct ApprovalsTally(Vec<ApprovalTallyLine>);
 
 // Regularly dump the no-show stats at this block number frequency.
 const NO_SHOW_DUMP_FREQUENCY: BlockNumber = 50;
@@ -996,7 +995,7 @@ impl State {
 			block_entry.parent_hash(),
 			block_entry.session(),
 		)
-		.await
+			.await
 		{
 			Some(s) => s,
 			None => return None,
@@ -1193,8 +1192,20 @@ impl State {
 		}
 	}
 
-	fn collect_approvals_tallies(session_index: SessionIndex) -> Vec<ApprovalsTallies> {
+	fn compute_approvals_tallies(&mut self, session_index: SessionIndex) -> Vec<ApprovalTallyLine> {
+		match self.approvals_usage.get(&session_index) {
+			None => return vec![],
+			Some((approvals_usage, n_validators)) => {
+				let mut approvals_tallies: Vec<ApprovalTallyLine> = vec![ApprovalTallyLine::default(); *n_validators];
+				approvals_usage.iter().for_each(|(validator_index, usage)| {
+					*approvals_tallies.get_mut(validator_index.0 as usize).unwrap() = ApprovalTallyLine {
+						approval_usages: *usage as u32,
+					}
+				});
 
+				return approvals_tallies;
+			}
+		}
 	}
 }
 
@@ -2110,17 +2121,7 @@ async fn handle_from_overseer<
 			gum::debug!(target: LOG_TARGET, ?block_hash, ?block_number, "Block finalized");
 			*last_finalized_height = Some(block_number);
 
-			let finalized_tip = match db.load_block_entry(hash)? {
-				None => {
-					gum::debug!(
-						target: LOG_TARGET,
-						?candidate_hash,
-						?hash,
-						"Block entry for assignment missing."
-					);
-				},
-				Some(e) => e,
-			};
+			let finalized_tip = db.load_block_entry(&block_hash)?.unwrap();
 
 			let is_new_session = match state.last_session_index {
 				Some(i) if finalized_tip.session() > i => true,
@@ -2129,7 +2130,8 @@ async fn handle_from_overseer<
 			};
 
 			if is_new_session {
-				state.compute_approvals_tallies(finalized_tip.session().saturate_sub(1));
+				// TODO share computed approvals tallies over the network
+				state.compute_approvals_tallies((finalized_tip.session() as u32).saturating_sub(1) as SessionIndex);
 				state.last_session_index = Some(finalized_tip.session());
 			}
 
@@ -3041,6 +3043,7 @@ where
 	*state.approvals_usage
 		.get_mut(&block_entry.session())
 		.unwrap()
+		.0
 		.entry(approval.validator)
 		.or_insert(0) += approval.candidate_indices.count_ones();
 
