@@ -891,6 +891,7 @@ struct State {
 	keystore: Arc<LocalKeystore>,
 	slot_duration_millis: u64,
 	clock: Arc<dyn Clock + Send + Sync>,
+	last_session_index: Option<SessionIndex>,
 	assignment_criteria: Box<dyn AssignmentCriteria + Send + Sync>,
 	// Per block, candidate records about how long we take until we gather enough
 	// assignments, this is relevant because it gives us a good idea about how many
@@ -903,6 +904,15 @@ struct State {
 	// where the ith index in the vector corresponds to the
 	approvals_usage: HashMap<SessionIndex, HashMap<ValidatorIndex, usize>>,
 }
+
+struct ApprovalsTally(Vec<ApprovalsTallyLine>);
+
+/// Our subjective record of what we used from some other validator on the finalized chain
+pub struct ApprovalTallyLine {
+	/// Approvals by this validator which our approvals gadget used in marking candidates approved.
+	approval_usages: u32,
+}
+
 
 // Regularly dump the no-show stats at this block number frequency.
 const NO_SHOW_DUMP_FREQUENCY: BlockNumber = 50;
@@ -1182,6 +1192,10 @@ impl State {
 				.or_default() += 1;
 		}
 	}
+
+	fn collect_approvals_tallies(session_index: SessionIndex) -> Vec<ApprovalsTallies> {
+
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -1256,12 +1270,13 @@ where
 		keystore: subsystem.keystore,
 		slot_duration_millis: subsystem.slot_duration_millis,
 		clock: subsystem.clock,
+		last_session_index: None,
 		assignment_criteria,
 		per_block_assignments_gathering_times: LruMap::new(ByLength::new(
 			MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 		)),
 		no_show_stats: NoShowStats::default(),
-		approvals_usage: HashMap::new(),
+		approvals_usage: Default::default(),
 	};
 
 	let mut last_finalized_height: Option<BlockNumber> = {
@@ -2094,6 +2109,29 @@ async fn handle_from_overseer<
 		FromOrchestra::Signal(OverseerSignal::BlockFinalized(block_hash, block_number)) => {
 			gum::debug!(target: LOG_TARGET, ?block_hash, ?block_number, "Block finalized");
 			*last_finalized_height = Some(block_number);
+
+			let finalized_tip = match db.load_block_entry(hash)? {
+				None => {
+					gum::debug!(
+						target: LOG_TARGET,
+						?candidate_hash,
+						?hash,
+						"Block entry for assignment missing."
+					);
+				},
+				Some(e) => e,
+			};
+
+			let is_new_session = match state.last_session_index {
+				Some(i) if finalized_tip.session() > i => true,
+				Some(_) => false,
+				None => true,
+			};
+
+			if is_new_session {
+				state.compute_approvals_tallies(finalized_tip.session().saturate_sub(1));
+				state.last_session_index = Some(finalized_tip.session());
+			}
 
 			crate::ops::canonicalize(db, block_number, block_hash)
 				.map_err(|e| SubsystemError::with_origin("db", e))?;
