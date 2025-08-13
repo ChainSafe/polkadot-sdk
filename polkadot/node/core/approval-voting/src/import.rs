@@ -320,6 +320,7 @@ pub struct BlockImportedCandidates {
 	pub block_hash: Hash,
 	pub block_number: BlockNumber,
 	pub block_tick: Tick,
+	pub session_index: SessionIndex,
 	pub imported_candidates: Vec<(CandidateHash, CandidateEntry)>,
 }
 
@@ -455,10 +456,6 @@ pub(crate) async fn handle_new_head<
 			force_approve,
 		} = imported_block_info;
 
-		state.approvals_usage
-			.entry(session_index)
-			.or_insert((HashMap::with_capacity(n_validators), n_validators));
-
 		let session_info =
 			match get_session_info(session_info_provider, sender, head, session_index).await {
 				Some(session_info) => session_info,
@@ -584,6 +581,7 @@ pub(crate) async fn handle_new_head<
 			block_hash,
 			block_number: block_header.number,
 			block_tick,
+			session_index: session_index,
 			imported_candidates: candidate_entries
 				.into_iter()
 				.map(|(h, e)| (h, e.into()))

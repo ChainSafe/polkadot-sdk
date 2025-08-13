@@ -5859,17 +5859,3 @@ fn test_observe_assignment_gathering_status() {
 
 	assert_eq!(value.get_sample_count(), 1);
 }
-
-#[test]
-fn test_computes_approvals_tallies_correctly() {
-	let mut state = import::tests::blank_state();
-
-	let usages = HashMap::from([(ValidatorIndex(0), 10), (ValidatorIndex(1), 8)]);
-	state.approvals_usage.insert(SessionIndex::from(5_u32), (usages, 2));
-
-	let tallies = state.compute_approvals_tallies(SessionIndex::from(5_u32));
-
-	assert_eq!(tallies.0, SessionIndex::from(5_u32));
-	assert_eq!(tallies.1.get(0).unwrap(), &ApprovalTallyLine{approval_usages: 10});
-	assert_eq!(tallies.1.get(1).unwrap(), &ApprovalTallyLine{approval_usages: 8});
-}
