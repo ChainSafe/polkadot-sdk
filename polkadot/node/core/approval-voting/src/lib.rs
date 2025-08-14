@@ -2157,6 +2157,8 @@ async fn handle_from_overseer<
 						_ => {},
 					}
 				};
+
+				state.last_session_index = Some(finalized_tip.session());
 			};
 
 			*last_finalized_height = Some(block_number);
