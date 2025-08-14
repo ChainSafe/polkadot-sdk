@@ -5638,6 +5638,8 @@ fn test_gathering_assignments_statements() {
 			MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 		)),
 		no_show_stats: NoShowStats::default(),
+		last_session_index: None,
+		approvals_usage: Default::default(),
 	};
 
 	for i in 0..200i32 {
@@ -5732,6 +5734,8 @@ fn test_observe_assignment_gathering_status() {
 			MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 		)),
 		no_show_stats: NoShowStats::default(),
+		last_session_index: None,
+		approvals_usage: Default::default(),
 	};
 
 	let metrics_inner = MetricsInner {

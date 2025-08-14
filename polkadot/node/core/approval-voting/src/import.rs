@@ -320,6 +320,7 @@ pub struct BlockImportedCandidates {
 	pub block_hash: Hash,
 	pub block_number: BlockNumber,
 	pub block_tick: Tick,
+	pub session_index: SessionIndex,
 	pub imported_candidates: Vec<(CandidateHash, CandidateEntry)>,
 }
 
@@ -341,7 +342,7 @@ pub(crate) async fn handle_new_head<
 >(
 	sender: &mut Sender,
 	approval_voting_sender: &mut AVSender,
-	state: &State,
+	state: &mut State,
 	db: &mut OverlayedBackend<'_, B>,
 	session_info_provider: &mut RuntimeInfo,
 	head: Hash,
@@ -580,6 +581,7 @@ pub(crate) async fn handle_new_head<
 			block_hash,
 			block_number: block_header.number,
 			block_tick,
+			session_index: session_index,
 			imported_candidates: candidate_entries
 				.into_iter()
 				.map(|(h, e)| (h, e.into()))
@@ -653,7 +655,7 @@ pub(crate) mod tests {
 		}
 	}
 
-	fn blank_state() -> State {
+	pub fn blank_state() -> State {
 		State {
 			keystore: Arc::new(LocalKeystore::in_memory()),
 			slot_duration_millis: 6_000,
@@ -663,6 +665,8 @@ pub(crate) mod tests {
 				MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 			)),
 			no_show_stats: Default::default(),
+			last_session_index: None,
+			approvals_usage: Default::default(),
 		}
 	}
 
@@ -1356,7 +1360,7 @@ pub(crate) mod tests {
 			.map(|(r, c, g)| CandidateEvent::CandidateIncluded(r, Vec::new().into(), c, g))
 			.collect::<Vec<_>>();
 
-		let (state, mut session_info_provider) = single_session_state();
+		let (mut state, mut session_info_provider) = single_session_state();
 		overlay_db.write_block_entry(
 			v3::BlockEntry {
 				block_hash: parent_hash,
@@ -1385,7 +1389,7 @@ pub(crate) mod tests {
 				let result = handle_new_head(
 					ctx.sender(),
 					&mut approval_voting_sender,
-					&state,
+					&mut state,
 					&mut overlay_db,
 					&mut session_info_provider,
 					hash,

@@ -85,7 +85,6 @@ use std::{
 	sync::Arc,
 	time::Duration,
 };
-
 use schnellru::{ByLength, LruMap};
 
 use approval_checking::RequiredTranches;
@@ -891,6 +890,7 @@ struct State {
 	keystore: Arc<LocalKeystore>,
 	slot_duration_millis: u64,
 	clock: Arc<dyn Clock + Send + Sync>,
+	last_session_index: Option<SessionIndex>,
 	assignment_criteria: Box<dyn AssignmentCriteria + Send + Sync>,
 	// Per block, candidate records about how long we take until we gather enough
 	// assignments, this is relevant because it gives us a good idea about how many
@@ -898,7 +898,23 @@ struct State {
 	per_block_assignments_gathering_times:
 		LruMap<BlockNumber, HashMap<(Hash, CandidateHash), AssignmentGatheringRecord>>,
 	no_show_stats: NoShowStats,
+
+	candidates_per_session: HashMap<SessionIndex, Vec<CandidateHash>>,
+
+	// amount of approvals usage per epoch per validator index
+	// where the ith index in the vector corresponds to the
+	approvals_usage: HashMap<SessionIndex, Vec<ApprovalTallyLine>>,
 }
+
+/// Our subjective record of what we used from some other validator on the finalized chain
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ApprovalTallyLine {
+	/// Approvals by this validator which our approvals gadget used in marking candidates approved.
+	approval_usages: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ApprovalsTally((SessionIndex, Vec<ApprovalTallyLine>));
 
 // Regularly dump the no-show stats at this block number frequency.
 const NO_SHOW_DUMP_FREQUENCY: BlockNumber = 50;
@@ -982,7 +998,7 @@ impl State {
 			block_entry.parent_hash(),
 			block_entry.session(),
 		)
-		.await
+			.await
 		{
 			Some(s) => s,
 			None => return None,
@@ -1252,11 +1268,14 @@ where
 		keystore: subsystem.keystore,
 		slot_duration_millis: subsystem.slot_duration_millis,
 		clock: subsystem.clock,
+		last_session_index: None,
 		assignment_criteria,
 		per_block_assignments_gathering_times: LruMap::new(ByLength::new(
 			MAX_BLOCKS_WITH_ASSIGNMENT_TIMESTAMPS,
 		)),
 		no_show_stats: NoShowStats::default(),
+		candidates_per_session: Default::default(),
+		approvals_usage: Default::default(),
 	};
 
 	let mut last_finalized_height: Option<BlockNumber> = {
@@ -2053,6 +2072,11 @@ async fn handle_from_overseer<
 							for (c_hash, c_entry) in block_batch.imported_candidates {
 								metrics.on_candidate_imported();
 
+								state.candidates_per_session
+									.entry(c_entry.session)
+									.and_modify(|candidates| { candidates.push(c_hash.clone()) })
+									.or_insert_with(|| vec![c_hash.clone()]);
+
 								let our_tranche = c_entry
 									.approval_entry(&block_batch.block_hash)
 									.and_then(|a| a.our_assignment().map(|a| a.tranche()));
@@ -2088,8 +2112,29 @@ async fn handle_from_overseer<
 		},
 		FromOrchestra::Signal(OverseerSignal::BlockFinalized(block_hash, block_number)) => {
 			gum::debug!(target: LOG_TARGET, ?block_hash, ?block_number, "Block finalized");
-			*last_finalized_height = Some(block_number);
+			let finalized_tip = db.load_block_entry(&block_hash)?.unwrap();
 
+			let is_new_session = match state.last_session_index {
+				Some(last_session) if finalized_tip.session() > last_session => true,
+				Some(_) => false,
+				None => true,
+			};
+
+			if is_new_session {
+				compute_approvals_usage_and_share(
+					sender,
+					approval_voting_sender,
+					state,
+					db,
+					finalized_tip.session(),
+					(block_hash, block_number),
+					last_finalized_height,
+				).await?;
+
+				state.last_session_index = Some(finalized_tip.session());
+			};
+
+			*last_finalized_height = Some(block_number);
 			crate::ops::canonicalize(db, block_number, block_hash)
 				.map_err(|e| SubsystemError::with_origin("db", e))?;
 
@@ -2321,6 +2366,59 @@ async fn get_approval_signatures_for_candidate<
 		Some("approval-voting-subsystem"),
 		Box::pin(get_approvals),
 	);
+	Ok(())
+}
+
+#[overseer::contextbounds(ApprovalVoting, prefix = self::overseer)]
+async fn compute_approvals_usage_and_share<
+	Sender: SubsystemSender<ChainApiMessage>,
+	ADSender: SubsystemSender<ApprovalDistributionMessage>
+>(
+	sender: &mut Sender,
+	approval_voting_sender: &mut ADSender,
+	state: &mut State,
+	db: &mut OverlayedBackend<'_, impl Backend>,
+	current_finalized_session: u32,
+	current_finalized: (Hash, u32),
+	last_finalized_height: &mut Option<BlockNumber>
+) -> SubsystemResult<()> {
+	let retrieve_size: usize = last_finalized_height
+		.clone()
+		.map_or(current_finalized.1, |b| current_finalized.1 - (b as u32)) as usize;
+
+	let finalized_hashes: HashSet<Hash> = fetch_ancestry(
+		sender,
+		current_finalized.0,
+		retrieve_size,
+	).await?.into_iter().collect();
+
+	let mut prev_session_approvals: HashMap<usize, u32> = HashMap::new();
+	let prev = current_finalized_session.saturating_sub(1) as SessionIndex;
+	let candidates = match state.candidates_per_session.remove(&prev) {
+		Some(candidates) => candidates,
+		_ => vec![],
+	};
+
+	for c_hash in candidates {
+		match db.load_candidate_entry(&c_hash)? {
+			Some(candidate) => {
+				let on_finalized_block = candidate.block_assignments
+					.keys()
+					.any(|b_hash| finalized_hashes.contains(b_hash));
+
+				if on_finalized_block {
+					for idx in candidate.approvals.iter_ones() {
+						prev_session_approvals
+							.entry(idx as usize)
+							.and_modify(|e| *e += 1)
+							.or_insert(0);
+					}
+				}
+			},
+			_ => {},
+		}
+	};
+
 	Ok(())
 }
 
@@ -3969,6 +4067,33 @@ async fn maybe_create_signature<
 	block_entry.issued_approval();
 	db.write_block_entry(block_entry.into());
 	Ok(None)
+}
+
+// Fetch ancestors in descending order, up to the amount requested.
+#[overseer::contextbounds(ApprovalVoting, prefix = self::overseer)]
+async fn fetch_ancestry<Sender: SubsystemSender<ChainApiMessage>>(
+	sender: &mut Sender,
+	relay_hash: Hash,
+	ancestors: usize,
+) -> SubsystemResult<Vec<Hash>> {
+	if ancestors == 0 {
+		return Ok(Vec::new())
+	}
+
+	let (tx, rx) = oneshot::channel();
+	sender.send_message(ChainApiMessage::Ancestors {
+		hash: relay_hash,
+		k: ancestors,
+		response_channel: tx,
+	}).await;
+
+	let hashes = match rx.await {
+		Ok(Ok(hashes)) => hashes,
+		Ok(Err(e)) => return Err(SubsystemError::with_origin("chain-api", e)),
+		Err(e) => return Err(SubsystemError::with_origin("chain-api", e)),
+	};
+
+	Ok(hashes)
 }
 
 // Sign an approval vote. Fails if the key isn't present in the store.
