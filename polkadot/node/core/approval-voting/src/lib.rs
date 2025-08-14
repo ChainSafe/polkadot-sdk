@@ -2112,8 +2112,6 @@ async fn handle_from_overseer<
 		},
 		FromOrchestra::Signal(OverseerSignal::BlockFinalized(block_hash, block_number)) => {
 			gum::debug!(target: LOG_TARGET, ?block_hash, ?block_number, "Block finalized");
-			*last_finalized_height = Some(block_number);
-
 			let finalized_tip = db.load_block_entry(&block_hash)?.unwrap();
 
 			let is_new_session = match state.last_session_index {
@@ -2123,6 +2121,16 @@ async fn handle_from_overseer<
 			};
 
 			if is_new_session {
+				let retrieve_size: usize = last_finalized_height
+					.clone()
+					.map_or(block_number, |b| block_number - (b as u32)) as usize;
+
+				let finalized_hashes: HashSet<Hash> = fetch_ancestry(
+					sender,
+					block_hash,
+					retrieve_size,
+				).await?.into_iter().collect();
+
 				let mut prev_session_approvals: HashMap<usize, u32> = HashMap::new();
 				let prev = (finalized_tip.session() as u32).saturating_sub(1) as SessionIndex;
 				let candidates = match state.candidates_per_session.remove(&prev) {
@@ -2133,11 +2141,17 @@ async fn handle_from_overseer<
 				for c_hash in candidates {
 					match db.load_candidate_entry(&c_hash)? {
 						Some(candidate) => {
-							for idx in candidate.approvals.iter_ones() {
-								prev_session_approvals
-									.entry(idx as usize)
-									.and_modify(|e| *e += 1)
-									.or_insert(0);
+							let on_finalized_block = candidate.block_assignments
+								.keys()
+								.any(|b_hash| finalized_hashes.contains(b_hash));
+
+							if on_finalized_block {
+								for idx in candidate.approvals.iter_ones() {
+									prev_session_approvals
+										.entry(idx as usize)
+										.and_modify(|e| *e += 1)
+										.or_insert(0);
+								}
 							}
 						},
 						_ => {},
@@ -2145,6 +2159,7 @@ async fn handle_from_overseer<
 				};
 			};
 
+			*last_finalized_height = Some(block_number);
 			crate::ops::canonicalize(db, block_number, block_hash)
 				.map_err(|e| SubsystemError::with_origin("db", e))?;
 
@@ -4035,6 +4050,33 @@ async fn maybe_create_signature<
 	Ok(None)
 }
 
+// Fetch ancestors in descending order, up to the amount requested.
+#[overseer::contextbounds(ApprovalVoting, prefix = self::overseer)]
+async fn fetch_ancestry<Sender: SubsystemSender<ChainApiMessage>>(
+	sender: &mut Sender,
+	relay_hash: Hash,
+	ancestors: usize,
+) -> SubsystemResult<Vec<Hash>> {
+	if ancestors == 0 {
+		return Ok(Vec::new())
+	}
+
+	let (tx, rx) = oneshot::channel();
+	sender.send_message(ChainApiMessage::Ancestors {
+		hash: relay_hash,
+		k: ancestors,
+		response_channel: tx,
+	}).await;
+
+	let hashes = match rx.await {
+		Ok(Ok(hashes)) => hashes,
+		Ok(Err(e)) => return Err(SubsystemError::with_origin("chain-api", e)),
+		Err(e) => return Err(SubsystemError::with_origin("chain-api", e)),
+	};
+
+	Ok(hashes)
+}
+
 // Sign an approval vote. Fails if the key isn't present in the store.
 fn sign_approval(
 	keystore: &LocalKeystore,
@@ -4109,3 +4151,5 @@ fn compute_delayed_approval_sending_tick(
 	metrics.on_delayed_approval(sign_no_later_than.checked_sub(tick_now).unwrap_or_default());
 	sign_no_later_than
 }
+
+
