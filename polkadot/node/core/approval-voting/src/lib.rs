@@ -4151,5 +4151,3 @@ fn compute_delayed_approval_sending_tick(
 	metrics.on_delayed_approval(sign_no_later_than.checked_sub(tick_now).unwrap_or_default());
 	sign_no_later_than
 }
-
-
