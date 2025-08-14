@@ -2121,42 +2121,15 @@ async fn handle_from_overseer<
 			};
 
 			if is_new_session {
-				let retrieve_size: usize = last_finalized_height
-					.clone()
-					.map_or(block_number, |b| block_number - (b as u32)) as usize;
-
-				let finalized_hashes: HashSet<Hash> = fetch_ancestry(
+				compute_approvals_usage_and_share(
 					sender,
-					block_hash,
-					retrieve_size,
-				).await?.into_iter().collect();
-
-				let mut prev_session_approvals: HashMap<usize, u32> = HashMap::new();
-				let prev = (finalized_tip.session() as u32).saturating_sub(1) as SessionIndex;
-				let candidates = match state.candidates_per_session.remove(&prev) {
-					Some(candidates) => candidates,
-					_ => vec![],
-				};
-
-				for c_hash in candidates {
-					match db.load_candidate_entry(&c_hash)? {
-						Some(candidate) => {
-							let on_finalized_block = candidate.block_assignments
-								.keys()
-								.any(|b_hash| finalized_hashes.contains(b_hash));
-
-							if on_finalized_block {
-								for idx in candidate.approvals.iter_ones() {
-									prev_session_approvals
-										.entry(idx as usize)
-										.and_modify(|e| *e += 1)
-										.or_insert(0);
-								}
-							}
-						},
-						_ => {},
-					}
-				};
+					approval_voting_sender,
+					state,
+					db,
+					finalized_tip.session(),
+					(block_hash, block_number),
+					last_finalized_height,
+				).await?;
 
 				state.last_session_index = Some(finalized_tip.session());
 			};
@@ -2393,6 +2366,59 @@ async fn get_approval_signatures_for_candidate<
 		Some("approval-voting-subsystem"),
 		Box::pin(get_approvals),
 	);
+	Ok(())
+}
+
+#[overseer::contextbounds(ApprovalVoting, prefix = self::overseer)]
+async fn compute_approvals_usage_and_share<
+	Sender: SubsystemSender<ChainApiMessage>,
+	ADSender: SubsystemSender<ApprovalDistributionMessage>
+>(
+	sender: &mut Sender,
+	approval_voting_sender: &mut ADSender,
+	state: &mut State,
+	db: &mut OverlayedBackend<'_, impl Backend>,
+	current_finalized_session: u32,
+	current_finalized: (Hash, u32),
+	last_finalized_height: &mut Option<BlockNumber>
+) -> SubsystemResult<()> {
+	let retrieve_size: usize = last_finalized_height
+		.clone()
+		.map_or(current_finalized.1, |b| current_finalized.1 - (b as u32)) as usize;
+
+	let finalized_hashes: HashSet<Hash> = fetch_ancestry(
+		sender,
+		current_finalized.0,
+		retrieve_size,
+	).await?.into_iter().collect();
+
+	let mut prev_session_approvals: HashMap<usize, u32> = HashMap::new();
+	let prev = current_finalized_session.saturating_sub(1) as SessionIndex;
+	let candidates = match state.candidates_per_session.remove(&prev) {
+		Some(candidates) => candidates,
+		_ => vec![],
+	};
+
+	for c_hash in candidates {
+		match db.load_candidate_entry(&c_hash)? {
+			Some(candidate) => {
+				let on_finalized_block = candidate.block_assignments
+					.keys()
+					.any(|b_hash| finalized_hashes.contains(b_hash));
+
+				if on_finalized_block {
+					for idx in candidate.approvals.iter_ones() {
+						prev_session_approvals
+							.entry(idx as usize)
+							.and_modify(|e| *e += 1)
+							.or_insert(0);
+					}
+				}
+			},
+			_ => {},
+		}
+	};
+
 	Ok(())
 }
 
@@ -3057,15 +3083,6 @@ where
 		.await;
 		actions.extend(new_actions);
 	}
-
-	let block_entry = match db.load_block_entry(&approval.block_hash)? {
-		Some(b) => b,
-		None => {
-			respond_early!(ApprovalCheckResult::Bad(ApprovalCheckError::UnknownBlock(
-				approval.block_hash
-			),))
-		},
-	};
 
 	// importing the approval can be heavy as it may trigger acceptance for a series of blocks.
 	Ok((actions, ApprovalCheckResult::Accepted))
