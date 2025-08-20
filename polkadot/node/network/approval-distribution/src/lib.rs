@@ -34,13 +34,14 @@ use polkadot_node_network_protocol::{
 	v3 as protocol_v3, PeerId, UnifiedReputationChange as Rep, ValidationProtocols, View,
 };
 use polkadot_node_primitives::{
-	approval::{
+	SessionInfo,
+	approval::{ 
 		criteria::{AssignmentCriteria, InvalidAssignment},
 		time::{Clock, ClockExt, SystemClock, TICK_TOO_FAR_IN_FUTURE},
 		v1::{BlockApprovalMeta, DelayTranche, RelayVRFStory},
 		v2::{
 			AsBitIndex, AssignmentCertKindV2, CandidateBitfield, IndirectAssignmentCertV2,
-			IndirectSignedApprovalVoteV2,
+			IndirectSignedApprovalVoteV2, SignedApprovalsTally, ApprovalTallyLine
 		},
 	},
 	DISPUTE_WINDOW,
@@ -324,6 +325,13 @@ enum Resend {
 	No,
 }
 
+#[derive(Default)]
+struct FinalizedSession {
+	relay_parent_hash: Hash,
+	session_info: SessionInfo,
+	tallies: HashMap<ValidatorIndex, Vec<SignedApprovalsTally>>
+}
+
 /// The [`State`] struct is responsible for tracking the overall state of the subsystem.
 ///
 /// It tracks metadata about our view of the unfinalized chain,
@@ -333,6 +341,8 @@ pub struct State {
 	/// These two fields are used in conjunction to construct a view over the unfinalized chain.
 	blocks_by_number: BTreeMap<BlockNumber, Vec<Hash>>,
 	blocks: HashMap<Hash, BlockEntry>,
+
+	finalized_sessions: HashMap<SessionIndex, FinalizedSession>
 
 	/// Our view updates to our peers can race with `NewBlocks` updates. We store messages received
 	/// against the directly mentioned blocks in our view in this map until `NewBlocks` is
@@ -1179,7 +1189,74 @@ impl State {
 				)
 				.await;
 			},
+			ValidationProtocols::V3(protocol_v3::ApprovalDistributionMessage::ApprovalsTallies(
+				signed_approvals_tally,
+			)) => {
+				let f_session = match state.finalized_sessions.get_mut(&tally.0) {
+					Some(session) => session,
+					None => return // TODO: include log here
+				}
+				
+				let active_validators = f_session.session_info.active_validator_indices;
+				if active_validators.len() != signed_approvals_tally.tallies.len() {
+					// there are more or less usages than validators 
+					// for the given session
+					// include log and punish the peer
+					return
+				}
+
+				let pubkey = match f_session
+					.session_info
+					.validators
+					.get(signed_approvals_tally.validator_index) 
+				{
+					Some(pubkey) => pubkey,
+					// include log here and punish the peer to give an 
+					// unknown validator index
+					None => return 
+				}
+
+				let approvals_tally = SignedApprovalsTally::unsigned(
+					signed_approvals_tally.session_index,
+					signed_approvals_tally.validator_index.clone(),
+					signed_approvals_tally.tallies,
+				);
+
+				if let Some(sig) = signed_approvals_tally.signature {
+					match approvals_tally.check_signature(pubkey, sig) {
+						Ok(_) => {}
+						// add log here and punish the peer to give and
+						// invalid signature
+						Err(_) => return
+					}
+				} else {
+					// punish the peer for not provide the signature
+				}
+
+				f_session.tallies.insert(
+					signed_approvals_tally.validator_index,
+					signed_approvals_tally.tallies,
+				);
+
+				// TODO: define an timeout or for receiving the 
+				// validators tallies?
+				// OR a min amount like 90% of 
+				// maybe store this in a auxiliary database so
+				// we don't care about storing everything in memory.
+				if f_session.tallies.len() == active_validators.len() {
+					calculate_and_circulate_medians(f_session);
+				} 
+			},
+			// ValidationProtocol::V3(protocol_v3::ApprovalDistributionMessage::ApprovalsMedians(
+			// 	medians,
+			// )) => {
+
+			// }
 		}
+	}
+
+	fn calculate_and_circulate_medians(finalized_session: &mut FinalizedSession) {
+		let mut approval_usage_medians: Vec<u32> = vec![finalized_session.];
 	}
 
 	// handle a peer view change: requires that the peer is already connected
@@ -2694,8 +2771,23 @@ impl ApprovalDistribution {
 				// activated and deactivated heads hence are irrelevant to this subsystem, other
 				// than for tracing purposes.
 			},
-			FromOrchestra::Signal(OverseerSignal::BlockFinalized(_hash, number)) => {
+			FromOrchestra::Signal(OverseerSignal::BlockFinalized(hash, number)) => {
 				gum::trace!(target: LOG_TARGET, number = %number, "finalized signal");
+				if let Some(block_entry) = state.blocks.get(&hash) {
+					let ExtendedSessionInfo { ref session_info, .. } = match session_info_provider
+						.get_session_info(runtime_api_sender, hash)
+						.await {
+							Ok(ext) => ext;
+							_ => return true;
+						}
+					
+					state.finalized_sessions.insert(block_entry.session, FinalizedSession{
+						relay_block_hash: hash.clone(),
+						session_info: session_info.clone(),
+						tallies: vec![],
+					})
+				}
+				
 				state.handle_block_finalized(network_sender, &self.metrics, number).await;
 			},
 			FromOrchestra::Signal(OverseerSignal::Conclude) => return true,
@@ -2807,6 +2899,9 @@ impl ApprovalDistribution {
 			ApprovalDistributionMessage::ApprovalCheckingLagUpdate(lag) => {
 				gum::debug!(target: LOG_TARGET, lag, "Received `ApprovalCheckingLagUpdate`");
 				state.approval_checking_lag = lag;
+			},
+			ApprovalDistributionMessage::DistributeUsages(session, usages) => {
+
 			},
 		}
 	}
