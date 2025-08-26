@@ -906,15 +906,6 @@ struct State {
 	approvals_usage: HashMap<SessionIndex, Vec<ApprovalTallyLine>>,
 }
 
-/// Our subjective record of what we used from some other validator on the finalized chain
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ApprovalTallyLine {
-	/// Approvals by this validator which our approvals gadget used in marking candidates approved.
-	approval_usages: u32,
-}
-
-#[derive(Clone, Debug)]
-struct ApprovalsTally((SessionIndex, Vec<ApprovalTallyLine>));
 
 // Regularly dump the no-show stats at this block number frequency.
 const NO_SHOW_DUMP_FREQUENCY: BlockNumber = 50;
@@ -2114,13 +2105,21 @@ async fn handle_from_overseer<
 			gum::debug!(target: LOG_TARGET, ?block_hash, ?block_number, "Block finalized");
 			let finalized_tip = db.load_block_entry(&block_hash)?.unwrap();
 
+			
 			let is_new_session = match state.last_session_index {
 				Some(last_session) if finalized_tip.session() > last_session => true,
 				Some(_) => false,
-				None => true,
+				None => {
+					// in case of NONE we dont need to share the approvals
+					// usage as we are under an ongoing session
+					state.last_session_index = Some(finalized_tip.session())
+					return false
+				},
 			};
 
 			if is_new_session {
+				// new session started then 
+				// lets compute the previous session approvals usage
 				compute_approvals_usage_and_share(
 					sender,
 					approval_voting_sender,
@@ -2378,22 +2377,29 @@ async fn compute_approvals_usage_and_share<
 	approval_voting_sender: &mut ADSender,
 	state: &mut State,
 	db: &mut OverlayedBackend<'_, impl Backend>,
-	current_finalized_session: u32,
+	current_session: u32,
 	current_finalized: (Hash, u32),
 	last_finalized_height: &mut Option<BlockNumber>
 ) -> SubsystemResult<()> {
+
+	//    0.         1
+	// 1 ... 10 | 11
+
 	let retrieve_size: usize = last_finalized_height
 		.clone()
 		.map_or(current_finalized.1, |b| current_finalized.1 - (b as u32)) as usize;
 
+	// TODO: change fetch ancestry to return not the range 
+	// but all the hashes of a given session so we can
+	// perform on_finalized_block with all the session blocks correctly
 	let finalized_hashes: HashSet<Hash> = fetch_ancestry(
 		sender,
 		current_finalized.0,
 		retrieve_size,
 	).await?.into_iter().collect();
 
-	let mut prev_session_approvals: HashMap<usize, u32> = HashMap::new();
-	let prev = current_finalized_session.saturating_sub(1) as SessionIndex;
+	let mut prev_session_approvals: HashMap<ValidatorIndex, u32> = HashMap::new();
+	let prev = current_session.saturating_sub(1) as SessionIndex;
 	let candidates = match state.candidates_per_session.remove(&prev) {
 		Some(candidates) => candidates,
 		_ => vec![],
@@ -2402,6 +2408,8 @@ async fn compute_approvals_usage_and_share<
 	for c_hash in candidates {
 		match db.load_candidate_entry(&c_hash)? {
 			Some(candidate) => {
+				// TODO: fix the candidate check as it does not
+				// check correclty every finalized session block
 				let on_finalized_block = candidate.block_assignments
 					.keys()
 					.any(|b_hash| finalized_hashes.contains(b_hash));
@@ -2409,7 +2417,7 @@ async fn compute_approvals_usage_and_share<
 				if on_finalized_block {
 					for idx in candidate.approvals.iter_ones() {
 						prev_session_approvals
-							.entry(idx as usize)
+							.entry(idx)
 							.and_modify(|e| *e += 1)
 							.or_insert(0);
 					}
@@ -2418,6 +2426,13 @@ async fn compute_approvals_usage_and_share<
 			_ => {},
 		}
 	};
+
+	if prev_session_approvals.len() > 0 {
+		let message = ApprovalDistributionMessage::DistributeUsages(
+			prev,
+			prev_session_approvals
+		);
+    }
 
 	Ok(())
 }
