@@ -15490,6 +15490,7 @@ dependencies = [
  "sp-consensus-slots",
  "sp-keystore",
  "sp-maybe-compressed-blob",
+ "sp-runtime",
  "thiserror 1.0.65",
  "zstd 0.12.4",
 ]
