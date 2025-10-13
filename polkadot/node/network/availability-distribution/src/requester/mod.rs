@@ -42,8 +42,8 @@ use polkadot_node_subsystem_util::{
 	runtime::{get_availability_cores, get_occupied_cores, RuntimeInfo},
 };
 use polkadot_primitives::{
-	BackedCandidate, CandidateHash, CoreIndex, CoreState, GroupIndex,
-	GroupRotationInfo, Hash, Id as paraId, SessionIndex, ValidatorIndex,
+	BackedCandidate, CandidateHash, CoreIndex, CoreState, GroupIndex, GroupRotationInfo, Hash,
+	Id as paraId, SessionIndex, ValidatorIndex,
 };
 
 use super::{FatalError, Metrics, Result, LOG_TARGET};
@@ -60,7 +60,7 @@ mod fetch_task;
 use crate::error::Error::{
 	CanceledValidatorGroups, FailedValidatorGroups, GetBackableCandidates, SubsystemUtil,
 };
-use fetch_task::{FetchTask, FetchTaskConfig, FromFetchTask};
+use fetch_task::{FetchTask, FetchTaskConfig, FetchType, FromFetchTask};
 
 /// Requester takes care of requesting erasure chunks from backing groups and stores them in the
 /// av store.
@@ -74,12 +74,6 @@ pub struct Requester {
 	///
 	/// We remove them on failure, so we get retries on the next block still pending availability.
 	fetches: HashMap<CandidateHash, FetchTask>,
-
-	/// Track candidates for which we initiated early fetching.
-	early_candidates: HashSet<CandidateHash>,
-
-	/// The last session index we've seen, used to detect session changes
-	last_session: Option<SessionIndex>,
 
 	/// Localized information about sessions we are currently interested in.
 	session_cache: SessionCache,
@@ -101,7 +95,7 @@ pub struct Requester {
 /// used to streamline chunk-fetching tasks. This structure normalizes data from both
 /// occupied and scheduled cores into a unified format containing only the fields
 /// necessary for chunk fetching and validation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CoreInfo {
 	/// The candidate hash.
 	candidate_hash: CandidateHash,
@@ -113,9 +107,12 @@ struct CoreInfo {
 	group_responsible: GroupIndex,
 }
 
+/// Origin of the chunk fetching.
 enum FetchOrigin {
+	/// Chunk fetching initiated before the candidate got backed on chain.
 	Early,
-	Slow,
+	/// Chunk fetching initiated after the candidate got backed on chain.
+	Late,
 }
 
 #[overseer::contextbounds(AvailabilityDistribution, prefix = self::overseer)]
@@ -131,8 +128,6 @@ impl Requester {
 		let (tx, rx) = mpsc::channel(1);
 		Requester {
 			fetches: HashMap::new(),
-			early_candidates: HashSet::new(),
-			last_session: None,
 			session_cache: SessionCache::new(),
 			tx,
 			rx,
@@ -151,115 +146,42 @@ impl Requester {
 		update: ActiveLeavesUpdate,
 	) -> Result<()> {
 		gum::trace!(target: LOG_TARGET, ?update, "Update fetching heads");
+
+		let mut prospective_candidates = HashSet::new();
+
 		let ActiveLeavesUpdate { activated, deactivated } = update;
 		if let Some(leaf) = activated {
 			// Order important! We need to handle activated, prior to deactivated, otherwise we
 			// might cancel still needed jobs.
 
-			// Get the session index for this leaf
-			let current_session = runtime
-				.get_session_index_for_child(&mut ctx.sender().clone(), leaf.hash)
-				.await?;
+			let scheduled_cores = self.schedule_cores_info(ctx, &leaf).await?;
 
-			// Check for session change or first initialization
-			match self.last_session {
-				None => {
-					// First initialization counts as a session change
-					self.handle_session_change();
-				},
-				Some(last_session) if current_session > last_session => {
-					// Session has changed, clean up early candidates
-					self.handle_session_change();
-				},
-				_ => {},
-			}
+			prospective_candidates = scheduled_cores
+				.iter()
+				.map(|(_, core_info)| core_info.candidate_hash)
+				.collect::<HashSet<_>>();
 
-			// Update our last seen session
-			self.last_session = Some(current_session);
 
-			self.start_requesting_chunks(ctx, runtime, leaf).await?;
+			gum::info!(
+				target: LOG_TARGET,
+				?leaf,
+				prospective_candidates = ?prospective_candidates,
+				"Starting to request chunks for activated leaf"
+			);
+			self.start_requesting_chunks(ctx, runtime, &leaf, scheduled_cores).await?;
 		}
 
-		self.stop_requesting_chunks(deactivated.into_iter());
+		self.stop_requesting_chunks(deactivated.into_iter(), &prospective_candidates);
 		Ok(())
 	}
 
-	/// Start requesting chunks for newly imported head.
-	///
-	/// This will also request [`SESSION_ANCESTRY_LEN`] leaf ancestors from the same session
-	/// and start requesting chunks for them too.
-	async fn start_requesting_chunks<Context>(
+	async fn schedule_cores_info<Context>(
 		&mut self,
 		ctx: &mut Context,
-		runtime: &mut RuntimeInfo,
-		new_head: ActivatedLeaf,
-	) -> Result<()> {
+		activated_leaf: &ActivatedLeaf,
+	) -> Result<Vec<(CoreIndex, CoreInfo)>> {
 		let sender = &mut ctx.sender().clone();
-		let ActivatedLeaf { hash: leaf, .. } = new_head;
-		let (leaf_session_index, ancestors_in_session) = get_block_ancestors_in_same_session(
-			sender,
-			runtime,
-			leaf,
-			Self::LEAF_ANCESTRY_LEN_WITHIN_SESSION,
-		)
-		.await?;
 
-		// Also spawn or bump tasks for candidates in ancestry in the same session.
-		for hash in std::iter::once(leaf).chain(ancestors_in_session) {
-			let occupied_cores = get_occupied_cores(sender, hash).await?;
-			gum::trace!(
-				target: LOG_TARGET,
-				occupied_cores = ?occupied_cores,
-				"Query occupied core"
-			);
-
-			let cores = occupied_cores
-				.into_iter()
-				.map(|(index, occ)| {
-					(
-						index,
-						CoreInfo {
-							candidate_hash: occ.candidate_hash,
-							relay_parent: occ.candidate_descriptor.relay_parent(),
-							erasure_root: occ.candidate_descriptor.erasure_root(),
-							group_responsible: occ.group_responsible,
-						},
-					)
-				})
-				.collect::<Vec<_>>();
-
-			// Important:
-			// We mark the whole ancestry as live in the **leaf** hash, so we don't need to track
-			// any tasks separately.
-			//
-			// The next time the subsystem receives leaf update, some of spawned task will be bumped
-			// to be live in fresh relay parent, while some might get dropped due to the current
-			// leaf being deactivated.
-			self.add_cores(ctx, runtime, leaf, leaf_session_index, cores, FetchOrigin::Slow)
-				.await?;
-		}
-
-		if let Err(err) = self
-			.early_request_chunks(ctx, runtime, new_head, leaf_session_index)
-			.await
-		{
-			gum::warn!(
-				target: LOG_TARGET,
-				error = ?err,
-				"Failed to early request chunks for activated leaf"
-			);
-		}
-		Ok(())
-	}
-
-	async fn early_request_chunks<Context>(
-		&mut self,
-		ctx: &mut Context,
-		runtime: &mut RuntimeInfo,
-		activated_leaf: ActivatedLeaf,
-		leaf_session_index: SessionIndex,
-	) -> Result<()> {
-		let sender = &mut ctx.sender().clone();
 		let validator_groups = &get_validator_groups(sender, activated_leaf.hash).await?;
 
 		let availability_cores =
@@ -279,39 +201,36 @@ impl Requester {
 		let total_cores = validator_groups.0.len();
 
 		// Process candidates and collect cores
-		let scheduled_cores = backable_candidates
-			.into_iter()
-			.flat_map(|(_, candidates)| {
-				candidates.into_iter().filter_map(move |candidate| {
-					let (_, core_index) = candidate.validator_indices_and_core_index();
-					let Some(core_index) = core_index else { return None };
+		let mut scheduled_cores = Vec::new();
+		for (para_id, candidates) in backable_candidates.iter() {
+			for candidate in candidates {
+				let (_, core_index) = candidate.validator_indices_and_core_index();
+				let Some(core_index) = core_index else { continue };
 
-					let receipt = candidate.candidate();
-					
-					Some((
-						core_index,
-						CoreInfo {
-							candidate_hash: receipt.hash(),
-							relay_parent: receipt.descriptor.relay_parent(),
-							erasure_root: receipt.descriptor.erasure_root(),
-							group_responsible: validator_groups
-								.1
-								.group_for_core(core_index, total_cores),
-						},
-					))
-				})
-			})
-			.collect::<Vec<_>>();
+				let receipt = candidate.candidate();
 
-		self.add_cores(
-			ctx,
-			runtime,
-			activated_leaf.hash,
-			leaf_session_index,
-			scheduled_cores,
-			FetchOrigin::Early,
-		)
-		.await
+				gum::info!(
+					target: LOG_TARGET,
+					para_id = ?para_id,
+					candidate_hash = ?receipt.hash(),
+					core_index = ?core_index,
+					"Scheduling candidate for core"
+				);
+
+				scheduled_cores.push((
+					core_index,
+					CoreInfo {
+						candidate_hash: receipt.hash(),
+						relay_parent: receipt.descriptor.relay_parent(),
+						erasure_root: receipt.descriptor.erasure_root(),
+						group_responsible: validator_groups
+							.1
+							.group_for_core(core_index, total_cores),
+					},
+				));
+			}
+		}
+		Ok(scheduled_cores)
 	}
 
 	/// Requests the hashes of backable candidates from prospective parachains subsystem,
@@ -358,24 +277,116 @@ impl Requester {
 		})
 	}
 
-	/// Stop requesting chunks for obsolete heads.
-	fn stop_requesting_chunks(&mut self, obsolete_leaves: impl Iterator<Item = Hash>) {
-		let obsolete_leaves: HashSet<_> = obsolete_leaves.collect();
-		self.fetches.retain(|_, task| {
-			task.remove_leaves(&obsolete_leaves);
-			task.is_live()
-		});
+	/// Start requesting chunks for newly imported head.
+	///
+	/// This will also request [`SESSION_ANCESTRY_LEN`] leaf ancestors from the same session
+	/// and start requesting chunks for them too.
+	async fn start_requesting_chunks<Context>(
+		&mut self,
+		ctx: &mut Context,
+		runtime: &mut RuntimeInfo,
+		new_head: &ActivatedLeaf,
+		schedule_cores_info: impl IntoIterator<Item = (CoreIndex, CoreInfo)>,
+	) -> Result<()> {
+		let sender = &mut ctx.sender().clone();
+		let &ActivatedLeaf { hash: leaf, .. } = new_head;
+		let (leaf_session_index, ancestors_in_session) = get_block_ancestors_in_same_session(
+			sender,
+			runtime,
+			leaf,
+			Self::LEAF_ANCESTRY_LEN_WITHIN_SESSION,
+		)
+		.await?;
+
+		// Also spawn or bump tasks for candidates in ancestry in the same session.
+		for hash in std::iter::once(leaf).chain(ancestors_in_session) {
+			let occupied_cores = get_occupied_cores(sender, hash).await?;
+			gum::trace!(
+				target: LOG_TARGET,
+				occupied_cores = ?occupied_cores,
+				"Query occupied core"
+			);
+
+			let cores = occupied_cores
+				.into_iter()
+				.map(|(index, occ)| {
+
+					gum::info!(
+						target: LOG_TARGET,
+						index = ?index,
+						candidate_hash = ?occ.candidate_hash,
+						next_up_on_available = ?occ.next_up_on_available,
+						leaf = ?leaf,
+						"Scheduled parachain candidate"
+					);
+
+					(
+						index,
+						CoreInfo {
+							candidate_hash: occ.candidate_hash,
+							relay_parent: occ.candidate_descriptor.relay_parent(),
+							erasure_root: occ.candidate_descriptor.erasure_root(),
+							group_responsible: occ.group_responsible,
+						},
+					)
+				})
+				.collect::<Vec<_>>();
+
+			// Important:
+			// We mark the whole ancestry as live in the **leaf** hash, so we don't need to track
+			// any tasks separately.
+			//
+			// The next time the subsystem receives leaf update, some of spawned task will be bumped
+			// to be live in fresh relay parent, while some might get dropped due to the current
+			// leaf being deactivated.
+			self.add_cores(ctx, runtime, leaf, leaf_session_index, cores, FetchOrigin::Late)
+				.await?;
+		}
+
+		if let Err(err) = self
+			.early_request_chunks(ctx, runtime, new_head, leaf_session_index, schedule_cores_info)
+			.await
+		{
+			gum::warn!(
+				target: LOG_TARGET,
+				error = ?err,
+				"Failed to early request chunks for activated leaf"
+			);
+		}
+		Ok(())
 	}
 
-	/// Clean up early candidate tracking at session change.
-	///
-	/// Any candidates that were fetched early but never seen on chain by session change
-	/// can be considered "never made it" since backing groups change at session boundaries.
-	fn handle_session_change(&mut self) {
-		// Process all remaining early candidates that never made it on-chain
-		for _candidate_hash in self.early_candidates.drain() {
-			self.metrics.on_early_candidate_never_onchain();
-		}
+	async fn early_request_chunks<Context>(
+		&mut self,
+		ctx: &mut Context,
+		runtime: &mut RuntimeInfo,
+		activated_leaf: &ActivatedLeaf,
+		leaf_session_index: SessionIndex,
+		schedule_cores_info: impl IntoIterator<Item = (CoreIndex, CoreInfo)>,
+	) -> Result<()> {
+		self.add_cores(
+			ctx,
+			runtime,
+			activated_leaf.hash,
+			leaf_session_index,
+			schedule_cores_info,
+			FetchOrigin::Early,
+		)
+		.await
+	}
+
+	/// Stop requesting chunks for obsolete heads, but keep entries for scheduled candidates.
+	fn stop_requesting_chunks(
+		&mut self,
+		obsolete_leaves: impl Iterator<Item = Hash>,
+		prospective_candidates: &HashSet<CandidateHash>,
+	) {
+		let obsolete_leaves: HashSet<_> = obsolete_leaves.collect();
+		self.fetches.retain(|candidate_hash, task| {
+			task.remove_leaves(&obsolete_leaves);
+			// Retain if candidate is scheduled OR still live in any leaf
+			prospective_candidates.contains(candidate_hash) || task.is_live()
+		});
 	}
 
 	/// Add candidates corresponding for a particular relay parent.
@@ -394,24 +405,53 @@ impl Requester {
 		cores: impl IntoIterator<Item = (CoreIndex, CoreInfo)>,
 		origin: FetchOrigin,
 	) -> Result<()> {
+		let cores = cores.into_iter().collect::<Vec<_>>();
+
+		for (_core_index, core) in cores.clone() {
+			match origin {
+				FetchOrigin::Early => {
+					gum::info!(
+						target: LOG_TARGET,
+						candidate_hash = ?core.candidate_hash,
+						leaf = ?leaf,
+						"add core for early fetching"
+					);
+				},
+				FetchOrigin::Late => {
+					gum::info!(
+						target: LOG_TARGET,
+						candidate_hash = ?core.candidate_hash,
+						leaf = ?leaf,
+						"add core for late fetching"
+					);
+				},
+			}
+		}
+
 		for (core_index, core) in cores {
-			if let Some(e) = self.fetches.get_mut(&core.candidate_hash) {
-				// Just book keeping - we are already requesting that chunk:
-				e.add_leaf(leaf);
-				self.process_known_candidate(core.candidate_hash);
-			} else {
-				// If we are on the slow path and this candidate was already fetched early (even
-				// if the task has completed), skip starting a duplicate fetch and record it.
-				if matches!(origin, FetchOrigin::Slow) &&
-					self.early_candidates.contains(&core.candidate_hash)
-				{
-					self.process_known_candidate(core.candidate_hash);
+			if let Some(e) = self.fetches.get_mut(&core.candidate_hash) { 
+
+				// The candidate reappears for early fetching because it's still in prospective parachain
+				// (not yet backed on-chain), but we don't need to fetch it again.
+				if matches!(origin, FetchOrigin::Early) {
 					continue;
 				}
 
-				let tx = self.tx.clone();
-				let metrics = self.metrics.clone();
+				// Just book keeping - we are already requesting that chunk:
+				e.add_leaf(leaf);
 
+				// Update the fetch type if we found early fetched candidate on chain,
+				// to avoid double counting in metrics.
+				if matches!(e.fetch_type, FetchType::Early) {
+					e.fetch_type = FetchType::EarlyOnChain;
+					self.metrics.on_early_candidate_backed_on_chain();
+					gum::info!(
+						target: LOG_TARGET,
+						candidate_hash = ?core.candidate_hash,
+						"Early fetched candidate later got backed on chain"
+					);
+				}
+			} else {
 				let session_info = self
 					.session_cache
 					.get_session_info(
@@ -447,8 +487,16 @@ impl Requester {
 						session_info.our_index,
 					)?;
 
+					let fetch_type = match origin {
+						FetchOrigin::Early => FetchType::Early,
+						FetchOrigin::Late => FetchType::Late(leaf),
+					};
+
+					let tx = self.tx.clone();
+					let metrics = self.metrics.clone();
+
 					let task_cfg = FetchTaskConfig::new(
-						leaf,
+						fetch_type,
 						&core,
 						tx,
 						metrics,
@@ -464,35 +512,26 @@ impl Requester {
 					// Record metrics for fetch origin only once we actually start a task
 					match origin {
 						FetchOrigin::Early => {
-							gum::debug!(
+							gum::info!(
 								target: LOG_TARGET,
 								candidate_hash = ?core.candidate_hash,
 								"Early candidate fetch initiated"
 							);
-							self.metrics.on_early_candidate_fetched();
-							self.early_candidates.insert(core.candidate_hash);
+							self.metrics.on_early_fetched_candidate();
 						},
-						FetchOrigin::Slow => {
-							gum::debug!(
+						FetchOrigin::Late => {
+							gum::info!(
 								target: LOG_TARGET,
 								candidate_hash = ?core.candidate_hash,
-								"Slow path candidate fetch initiated"
+								"Late path candidate fetch initiated"
 							);
-							self.metrics.on_slow_candidate_fetched();
+							self.metrics.on_late_fetched_candidate();
 						},
 					}
 				}
 			}
 		}
 		Ok(())
-	}
-
-	fn process_known_candidate(&mut self, candidate: CandidateHash) {
-		// Only increment skip metric if we actually remove the candidate
-		// This ensures we only count unique skips
-		if self.early_candidates.remove(&candidate) {
-			self.metrics.on_early_candidate_skipped_on_slow();
-		}
 	}
 }
 

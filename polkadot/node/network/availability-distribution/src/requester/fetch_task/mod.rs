@@ -60,10 +60,24 @@ mod tests;
 pub struct FetchTaskConfig {
 	prepared_running: Option<RunningTask>,
 	live_in: HashSet<Hash>,
+	fetch_type: FetchType,
+}
+
+pub enum FetchType {
+	/// Early fetched erasure coded chunk, before it was backed on-chain.
+	Early,
+	/// The candidate successfully got backed on-chain for which we already fetched the chunk
+	/// early.
+	EarlyOnChain,
+	/// Late fetched erasure coded chunk, after it was backed on-chain.
+	/// The hash represents the block hash where the candidate was backed on chain.
+	Late(Hash),
 }
 
 /// Information about a task fetching an erasure chunk.
 pub struct FetchTask {
+	pub fetch_type: FetchType,
+
 	/// For what relay parents this task is relevant.
 	///
 	/// In other words, for which relay chain parents this candidate is considered live.
@@ -147,7 +161,7 @@ impl FetchTaskConfig {
 	///
 	/// The result of this function can be passed into [`FetchTask::start`].
 	pub fn new(
-		leaf: Hash,
+		fetch_type: FetchType,
 		core: &CoreInfo,
 		sender: mpsc::Sender<FromFetchTask>,
 		metrics: Metrics,
@@ -156,11 +170,14 @@ impl FetchTaskConfig {
 		req_v1_protocol_name: ProtocolName,
 		req_v2_protocol_name: ProtocolName,
 	) -> Self {
-		let live_in = vec![leaf].into_iter().collect();
+		let live_in = match fetch_type {
+			FetchType::Late(block_hash) => vec![block_hash].into_iter().collect(),
+			_ => vec![].into_iter().collect(),
+		};
 
 		// Don't run tasks for our backing group:
 		if session_info.our_group == Some(core.group_responsible) {
-			return FetchTaskConfig { live_in, prepared_running: None };
+			return FetchTaskConfig { fetch_type, live_in, prepared_running: None };
 		}
 
 		let prepared_running = RunningTask {
@@ -181,7 +198,7 @@ impl FetchTaskConfig {
 			req_v1_protocol_name,
 			req_v2_protocol_name
 		};
-		FetchTaskConfig { live_in, prepared_running: Some(prepared_running) }
+		FetchTaskConfig { fetch_type, live_in, prepared_running: Some(prepared_running) }
 	}
 }
 
@@ -191,7 +208,7 @@ impl FetchTask {
 	///
 	/// A task handling the fetching of the configured chunk will be spawned.
 	pub async fn start<Context>(config: FetchTaskConfig, ctx: &mut Context) -> Result<Self> {
-		let FetchTaskConfig { prepared_running, live_in } = config;
+		let FetchTaskConfig { prepared_running, live_in, fetch_type } = config;
 
 		if let Some(running) = prepared_running {
 			let (handle, kill) = oneshot::channel();
@@ -199,9 +216,9 @@ impl FetchTask {
 			ctx.spawn("chunk-fetcher", running.run(kill).boxed())
 				.map_err(|e| FatalError::SpawnTask(e))?;
 
-			Ok(FetchTask { live_in, state: FetchedState::Started(handle) })
+			Ok(FetchTask { fetch_type, live_in, state: FetchedState::Started(handle) })
 		} else {
-			Ok(FetchTask { live_in, state: FetchedState::Canceled })
+			Ok(FetchTask { fetch_type, live_in, state: FetchedState::Canceled })
 		}
 	}
 

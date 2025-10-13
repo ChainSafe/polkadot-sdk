@@ -88,6 +88,16 @@ async fn async_backing_6_seconds_rate_test() -> Result<(), anyhow::Error> {
 	// candidates. We can only do this for the collator based on cumulus.
 	assert_finality_lag(&para_node_2001.wait_client().await?, 6).await?;
 
+	let early = relay_node.reports("polkadot_parachain_early_candidates_fetched_total").await?;
+	let late = relay_node.reports("polkadot_parachain_late_fetched_candidates_total").await?;
+	let early_got_onchain = relay_node
+		.reports("polkadot_parachain_early_candidates_backed_on_chain_total")
+		.await?;
+
+	log::info!("Early candidates fetched: {early}");
+	log::info!("Late candidates fetched: {late}");
+	log::info!("Early fetched candidates got onchain: {early_got_onchain}");
+
 	log::info!("Test finished successfully");
 
 	Ok(())
