@@ -431,14 +431,14 @@ impl Requester {
 		for (core_index, core) in cores {
 			if let Some(e) = self.fetches.get_mut(&core.candidate_hash) { 
 
+				// Just book keeping - we are already requesting that chunk:
+				e.add_leaf(leaf);
+				
 				// The candidate reappears for early fetching because it's still in prospective parachain
 				// (not yet backed on-chain), but we don't need to fetch it again.
 				if matches!(origin, FetchOrigin::Early) {
 					continue;
 				}
-
-				// Just book keeping - we are already requesting that chunk:
-				e.add_leaf(leaf);
 
 				// Update the fetch type if we found early fetched candidate on chain,
 				// to avoid double counting in metrics.
@@ -506,6 +506,14 @@ impl Requester {
 						self.req_protocol_names.get_name(v2::ChunkFetchingRequest::PROTOCOL),
 					);
 
+					gum::info!(
+						target: LOG_TARGET,
+						candidate_hash = ?core.candidate_hash,
+						task_cfg = ?task_cfg,
+						"Starting new fetch task"
+					);
+					
+
 					self.fetches
 						.insert(core.candidate_hash, FetchTask::start(task_cfg, context).await?);
 
@@ -543,11 +551,20 @@ impl Stream for Requester {
 			match Pin::new(&mut self.rx).poll_next(ctx) {
 				Poll::Ready(Some(FromFetchTask::Message(m))) => return Poll::Ready(Some(m)),
 				Poll::Ready(Some(FromFetchTask::Concluded(Some(bad_boys)))) => {
+					gum::info!(
+						target: LOG_TARGET,
+						"Fetch task concluded with bad boys"
+					);
 					self.session_cache.report_bad_log(bad_boys);
 					continue;
 				},
 				Poll::Ready(Some(FromFetchTask::Concluded(None))) => continue,
 				Poll::Ready(Some(FromFetchTask::Failed(candidate_hash))) => {
+					gum::info!(
+						target: LOG_TARGET,
+						candidate_hash = ?candidate_hash,
+						"Fetch task failed, removing from active fetches"
+					);
 					// Make sure we retry on next block still pending availability.
 					self.fetches.remove(&candidate_hash);
 				},

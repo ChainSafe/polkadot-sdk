@@ -39,6 +39,7 @@ use polkadot_primitives::{
 	SessionIndex,
 };
 use sc_network::ProtocolName;
+use sp_core::serde::de;
 
 use crate::{
 	error::{FatalError, Result},
@@ -63,6 +64,17 @@ pub struct FetchTaskConfig {
 	fetch_type: FetchType,
 }
 
+impl std::fmt::Debug for FetchTaskConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchTaskConfig")
+            .field("prepared_running", &self.prepared_running.is_some())
+            .field("live_in", &self.live_in)
+            .field("fetch_type", &self.fetch_type)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 pub enum FetchType {
 	/// Early fetched erasure coded chunk, before it was backed on-chain.
 	Early,
@@ -292,6 +304,17 @@ impl RunningTask {
 			}
 			count += 1;
 
+			gum::info!(
+				target: LOG_TARGET,
+				validator = ?validator,
+				relay_parent = ?self.relay_parent,
+				group_index = ?self.group_index,
+				session_index = ?self.session_index,
+				chunk_index = ?self.request.index,
+				candidate_hash = ?self.request.candidate_hash,
+				"About to request erasure chunk from validator"
+			);
+
 			// Send request:
 			let resp = match self
 				.do_request(&validator, &mut network_error_freq, &mut canceled_freq)
@@ -307,6 +330,16 @@ impl RunningTask {
 					return;
 				},
 				Err(TaskError::PeerError) => {
+					gum::info!(
+						target: LOG_TARGET,
+						validator = ?validator,
+						relay_parent = ?self.relay_parent,
+						group_index = ?self.group_index,
+						session_index = ?self.session_index,
+						chunk_index = ?self.request.index,
+						candidate_hash = ?self.request.candidate_hash,
+						"Error requesting erasure chunk from validator"
+					);
 					bad_validators.push(validator);
 					continue;
 				},
@@ -330,11 +363,33 @@ impl RunningTask {
 				},
 			};
 
+			gum::info!(
+				target: LOG_TARGET,
+				validator = ?validator,
+				relay_parent = ?self.relay_parent,
+				group_index = ?self.group_index,
+				session_index = ?self.session_index,
+				chunk_index = ?self.request.index,
+				candidate_hash = ?self.request.candidate_hash,
+				"Validating fetched erasure chunk"
+			);
+
 			// Data genuine?
 			if !self.validate_chunk(&validator, &chunk, self.chunk_index) {
 				bad_validators.push(validator);
 				continue;
 			}
+
+			gum::info!(
+				target: LOG_TARGET,
+				validator = ?validator,
+				relay_parent = ?self.relay_parent,
+				group_index = ?self.group_index,
+				session_index = ?self.session_index,
+				chunk_index = ?self.request.index,
+				candidate_hash = ?self.request.candidate_hash,
+				"Storing fetched erasure chunk"
+			);
 
 			// Ok, let's store it and be happy:
 			self.store_chunk(chunk).await;
@@ -343,9 +398,28 @@ impl RunningTask {
 		}
 		if succeeded {
 			self.metrics.on_fetch(SUCCEEDED);
+			gum::info!(
+				target: LOG_TARGET,
+				relay_parent = ?self.relay_parent,
+				group_index = ?self.group_index,
+				session_index = ?self.session_index,
+				chunk_index = ?self.request.index,
+				candidate_hash = ?self.request.candidate_hash,
+				bad_validators = ?bad_validators,
+				"Successfully fetched erasure chunk"
+			);
 			self.conclude(bad_validators).await;
 		} else {
 			self.metrics.on_fetch(FAILED);
+			gum::info!(
+				target: LOG_TARGET,
+				relay_parent = ?self.relay_parent,
+				group_index = ?self.group_index,
+				session_index = ?self.session_index,
+				chunk_index = ?self.request.index,
+				candidate_hash = ?self.request.candidate_hash,
+				"Failed to fetch erasure chunk from all validators in group"
+			);
 			self.conclude_fail().await
 		}
 	}
@@ -357,7 +431,7 @@ impl RunningTask {
 		network_error_freq: &mut gum::Freq,
 		canceled_freq: &mut gum::Freq,
 	) -> std::result::Result<Option<ErasureChunk>, TaskError> {
-		gum::trace!(
+		gum::debug!(
 			target: LOG_TARGET,
 			origin = ?validator,
 			relay_parent = ?self.relay_parent,
@@ -376,6 +450,8 @@ impl RunningTask {
 		);
 		let requests = Requests::ChunkFetching(full_request);
 
+
+
 		self.sender
 			.send(FromFetchTask::Message(
 				NetworkBridgeTxMessage::SendRequests(
@@ -386,8 +462,32 @@ impl RunningTask {
 			))
 			.await
 			.map_err(|_| TaskError::ShuttingDown)?;
+		
+		gum::debug!(
+			target: LOG_TARGET,
+			origin = ?validator,
+			relay_parent = ?self.relay_parent,
+			group_index = ?self.group_index,
+			session_index = ?self.session_index,
+			chunk_index = ?self.request.index,
+			candidate_hash = ?self.request.candidate_hash,
+			"Chunk request sent, awaiting response",
+		);
 
-		match response_recv.await {
+		let resp = response_recv.await;
+
+		gum::debug!(
+			target: LOG_TARGET,
+			origin = ?validator,
+			relay_parent = ?self.relay_parent,
+			group_index = ?self.group_index,
+			session_index = ?self.session_index,
+			chunk_index = ?self.request.index,
+			candidate_hash = ?self.request.candidate_hash,
+			response = ?resp,
+			"Chunk response received",
+		);
+		match resp {
 			Ok((bytes, protocol)) => match protocol {
 				_ if protocol == self.req_v2_protocol_name =>
 					match v2::ChunkFetchingResponse::decode(&mut &bytes[..]) {
@@ -455,9 +555,9 @@ impl RunningTask {
 				Err(TaskError::PeerError)
 			},
 			Err(RequestError::NetworkError(err)) => {
-				gum::warn_if_frequent!(
-					freq: network_error_freq,
-					max_rate: gum::Times::PerHour(100),
+				gum::warn!(
+					// freq: network_error_freq,
+					// max_rate: gum::Times::PerHour(100),
 					target: LOG_TARGET,
 					origin = ?validator,
 					relay_parent = ?self.relay_parent,
@@ -471,9 +571,9 @@ impl RunningTask {
 				Err(TaskError::PeerError)
 			},
 			Err(RequestError::Canceled(oneshot::Canceled)) => {
-				gum::warn_if_frequent!(
-					freq: canceled_freq,
-					max_rate: gum::Times::PerHour(100),
+				gum::warn!(
+					// freq: canceled_freq,
+					// max_rate: gum::Times::PerHour(100),
 					target: LOG_TARGET,
 					origin = ?validator,
 					relay_parent = ?self.relay_parent,

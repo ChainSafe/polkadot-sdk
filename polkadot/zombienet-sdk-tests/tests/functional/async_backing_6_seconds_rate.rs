@@ -27,7 +27,7 @@ async fn async_backing_6_seconds_rate_test() -> Result<(), anyhow::Error> {
 				.with_chain("rococo-local")
 				.with_default_command("polkadot")
 				.with_default_image(images.polkadot.as_str())
-				.with_default_args(vec![("-lparachain=debug").into()])
+				.with_default_args(vec![("-lparachain=debug,sub-libp2p=trace,sub-libp2p::request-response=trace").into()])
 				.with_genesis_overrides(json!({
 					"configuration": {
 						"config": {

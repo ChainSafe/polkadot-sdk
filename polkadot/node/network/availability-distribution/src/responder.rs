@@ -231,7 +231,7 @@ where
 
 	let result = chunk.is_some();
 
-	gum::trace!(
+	gum::debug!(
 		target: LOG_TARGET,
 		hash = ?payload.candidate_hash,
 		index = ?payload.index,
