@@ -36,14 +36,17 @@ use polkadot_node_subsystem::{
 };
 use polkadot_primitives::{
 	AuthorityDiscoveryId, BlakeTwo256, CandidateHash, ChunkIndex, GroupIndex, Hash, HashT,
-	OccupiedCore, SessionIndex,
+	SessionIndex,
 };
 use sc_network::ProtocolName;
 
 use crate::{
 	error::{FatalError, Result},
 	metrics::{Metrics, FAILED, SUCCEEDED},
-	requester::session_cache::{BadValidators, SessionInfo},
+	requester::{
+		session_cache::{BadValidators, SessionInfo},
+		CoreInfo,
+	},
 	LOG_TARGET,
 };
 
@@ -55,12 +58,22 @@ mod tests;
 /// This exists to separate preparation of a `FetchTask` from actual starting it, which is
 /// beneficial as this allows as for taking session info by reference.
 pub struct FetchTaskConfig {
+	backed_on_chain: BackedOnChain,
 	prepared_running: Option<RunningTask>,
 	live_in: HashSet<Hash>,
 }
 
+// the candidate for which we are fetching the chunk is already backed on-chain or not.
+pub enum BackedOnChain {
+	Yes,
+	No,
+}
+
 /// Information about a task fetching an erasure chunk.
 pub struct FetchTask {
+	/// Whether the candidate is backed on-chain or not.
+	pub(crate) backed_on_chain: BackedOnChain,
+
 	/// For what relay parents this task is relevant.
 	///
 	/// In other words, for which relay chain parents this candidate is considered live.
@@ -145,11 +158,12 @@ impl FetchTaskConfig {
 	/// The result of this function can be passed into [`FetchTask::start`].
 	pub fn new(
 		leaf: Hash,
-		core: &OccupiedCore,
+		core: &CoreInfo,
 		sender: mpsc::Sender<FromFetchTask>,
 		metrics: Metrics,
 		session_info: &SessionInfo,
 		chunk_index: ChunkIndex,
+		backed_on_chain: BackedOnChain,
 		req_v1_protocol_name: ProtocolName,
 		req_v2_protocol_name: ProtocolName,
 	) -> Self {
@@ -157,7 +171,7 @@ impl FetchTaskConfig {
 
 		// Don't run tasks for our backing group:
 		if session_info.our_group == Some(core.group_responsible) {
-			return FetchTaskConfig { live_in, prepared_running: None }
+			return FetchTaskConfig { backed_on_chain, live_in, prepared_running: None };
 		}
 
 		let prepared_running = RunningTask {
@@ -170,15 +184,15 @@ impl FetchTaskConfig {
 				candidate_hash: core.candidate_hash,
 				index: session_info.our_index,
 			},
-			erasure_root: core.candidate_descriptor.erasure_root(),
-			relay_parent: core.candidate_descriptor.relay_parent(),
+			erasure_root: core.erasure_root,
+			relay_parent: core.relay_parent,
 			metrics,
 			sender,
 			chunk_index,
 			req_v1_protocol_name,
 			req_v2_protocol_name
 		};
-		FetchTaskConfig { live_in, prepared_running: Some(prepared_running) }
+		FetchTaskConfig { backed_on_chain, live_in, prepared_running: Some(prepared_running) }
 	}
 }
 
@@ -188,7 +202,7 @@ impl FetchTask {
 	///
 	/// A task handling the fetching of the configured chunk will be spawned.
 	pub async fn start<Context>(config: FetchTaskConfig, ctx: &mut Context) -> Result<Self> {
-		let FetchTaskConfig { prepared_running, live_in } = config;
+		let FetchTaskConfig { prepared_running, live_in, backed_on_chain } = config;
 
 		if let Some(running) = prepared_running {
 			let (handle, kill) = oneshot::channel();
@@ -196,9 +210,9 @@ impl FetchTask {
 			ctx.spawn("chunk-fetcher", running.run(kill).boxed())
 				.map_err(|e| FatalError::SpawnTask(e))?;
 
-			Ok(FetchTask { live_in, state: FetchedState::Started(handle) })
+			Ok(FetchTask { backed_on_chain, live_in, state: FetchedState::Started(handle) })
 		} else {
-			Ok(FetchTask { live_in, state: FetchedState::Canceled })
+			Ok(FetchTask { backed_on_chain, live_in, state: FetchedState::Canceled })
 		}
 	}
 
@@ -284,11 +298,11 @@ impl RunningTask {
 						"Node seems to be shutting down, canceling fetch task"
 					);
 					self.metrics.on_fetch(FAILED);
-					return
+					return;
 				},
 				Err(TaskError::PeerError) => {
 					bad_validators.push(validator);
-					continue
+					continue;
 				},
 			};
 
@@ -306,20 +320,20 @@ impl RunningTask {
 						"Validator did not have our chunk"
 					);
 					bad_validators.push(validator);
-					continue
+					continue;
 				},
 			};
 
 			// Data genuine?
 			if !self.validate_chunk(&validator, &chunk, self.chunk_index) {
 				bad_validators.push(validator);
-				continue
+				continue;
 			}
 
 			// Ok, let's store it and be happy:
 			self.store_chunk(chunk).await;
 			succeeded = true;
-			break
+			break;
 		}
 		if succeeded {
 			self.metrics.on_fetch(SUCCEEDED);
@@ -483,7 +497,7 @@ impl RunningTask {
 				expected_chunk_index = ?expected_chunk_index,
 				"Validator sent the wrong chunk",
 			);
-			return false
+			return false;
 		}
 		let anticipated_hash =
 			match branch_hash(&self.erasure_root, chunk.proof(), chunk.index.0 as usize) {
@@ -496,13 +510,13 @@ impl RunningTask {
 						error = ?e,
 						"Failed to calculate chunk merkle proof",
 					);
-					return false
+					return false;
 				},
 			};
 		let erasure_chunk_hash = BlakeTwo256::hash(&chunk.chunk);
 		if anticipated_hash != erasure_chunk_hash {
 			gum::warn!(target: LOG_TARGET, origin = ?validator,  "Received chunk does not match merkle tree");
-			return false
+			return false;
 		}
 		true
 	}

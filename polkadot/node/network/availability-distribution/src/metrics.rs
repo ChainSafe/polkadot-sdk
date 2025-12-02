@@ -56,6 +56,15 @@ struct MetricsInner {
 	/// Number of times our first set of validators did not provide the needed chunk and we had to
 	/// query further validators.
 	retries: Counter<U64>,
+
+	/// Number of candidates for which we initiated chunk fetching before getting backed on chain (early path).
+	early_fetched_candidates: Counter<U64>,
+	
+	/// Number of candidates for which we initiated chunk fetching after getting backed on chain (late path).
+	late_fetched_candidates: Counter<U64>,
+
+	/// Number of candidates fetched early that later appeared as backed on-chain.
+	early_candidates_backed_on_chain: Counter<U64>,
 }
 
 impl Metrics {
@@ -98,6 +107,27 @@ impl Metrics {
 			metrics.retries.inc()
 		}
 	}
+
+	/// Increment early candidates fetched counter.
+	pub fn on_early_fetched_candidate(&self) {
+		if let Some(metrics) = &self.0 {
+			metrics.early_fetched_candidates.inc()
+		}
+	}
+
+	/// Increment late candidates fetched counter.
+	pub fn on_late_fetched_candidate(&self) {
+		if let Some(metrics) = &self.0 {
+			metrics.late_fetched_candidates.inc()
+		}
+	}
+
+	/// Increment early fetched candidates that later got backed on chain counter.(skipped duplicate fetch)
+	pub fn on_early_candidate_backed_on_chain(&self) {
+		if let Some(metrics) = &self.0 {
+			metrics.early_candidates_backed_on_chain.inc()
+		}
+	}
 }
 
 impl metrics::Metrics for Metrics {
@@ -109,7 +139,7 @@ impl metrics::Metrics for Metrics {
 						"polkadot_parachain_fetched_chunks_total",
 						"Total number of fetched chunks.",
 					),
-					&["success"]
+					&["success"],
 				)?,
 				registry,
 			)?,
@@ -119,7 +149,7 @@ impl metrics::Metrics for Metrics {
 						"polkadot_parachain_served_chunks_total",
 						"Total number of chunks served by this backer.",
 					),
-					&["success"]
+					&["success"],
 				)?,
 				registry,
 			)?,
@@ -129,7 +159,7 @@ impl metrics::Metrics for Metrics {
 						"polkadot_parachain_fetched_povs_total",
 						"Total number of povs fetches by this backer.",
 					),
-					&["success"]
+					&["success"],
 				)?,
 				registry,
 			)?,
@@ -139,7 +169,7 @@ impl metrics::Metrics for Metrics {
 						"polkadot_parachain_served_povs_total",
 						"Total number of povs served by this backer.",
 					),
-					&["success"]
+					&["success"],
 				)?,
 				registry,
 			)?,
@@ -147,6 +177,27 @@ impl metrics::Metrics for Metrics {
 				Counter::new(
 					"polkadot_parachain_fetch_retries_total",
 					"Number of times we did not succeed in fetching a chunk and needed to try more backers.",
+				)?,
+				registry,
+			)?,
+			early_fetched_candidates: prometheus::register(
+				Counter::new(
+					"polkadot_parachain_early_fetched_candidates_total",
+					"Number of candidates for which we initiated chunk fetching before getting backed on chain (early path).",
+				)?,
+				registry,
+			)?,
+			late_fetched_candidates: prometheus::register(
+				Counter::new(
+					"polkadot_parachain_late_fetched_candidates_total",
+					"Number of candidates for which we initiated chunk fetching after getting backed on chain (late path).",
+				)?,
+				registry,
+			)?,
+			early_candidates_backed_on_chain: prometheus::register(
+				Counter::new(
+					"polkadot_parachain_early_candidates_backed_on_chain_total",
+					"Number of early-fetched candidates that later got backed on chain (duplicate fetch skipped).",
 				)?,
 				registry,
 			)?,
