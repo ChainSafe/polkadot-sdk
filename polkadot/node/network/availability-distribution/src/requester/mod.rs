@@ -31,16 +31,21 @@ use futures::{
 
 use polkadot_node_network_protocol::request_response::{v1, v2, IsRequest, ReqProtocolNames};
 use polkadot_node_subsystem::{
-	messages::{ChainApiMessage, RuntimeApiMessage},
+	messages::{ChainApiMessage, RuntimeApiMessage, CandidateBackingMessage, AvailabilityStoreMessage},
 	overseer, ActivatedLeaf, ActiveLeavesUpdate,
+	SubsystemSender,
 };
 use polkadot_node_subsystem_util::{
 	availability_chunks::availability_chunk_index,
 	runtime::{get_occupied_cores, RuntimeInfo},
+	request_availability_cores,
+	request_backable_candidates,
+	request_validator_groups,
+	runtime::recv_runtime,
 };
-use polkadot_primitives::{CandidateHash, CoreIndex, Hash, OccupiedCore, SessionIndex};
+use polkadot_primitives::{CandidateHash, CoreIndex, GroupIndex, Hash, SessionIndex};
 
-use super::{FatalError, Metrics, Result, LOG_TARGET};
+use super::{FatalError, Metrics, Result, LOG_TARGET, error::Error};
 
 #[cfg(test)]
 mod tests;
@@ -52,6 +57,32 @@ use session_cache::SessionCache;
 /// A task fetching a particular chunk.
 mod fetch_task;
 use fetch_task::{FetchTask, FetchTaskConfig, FromFetchTask};
+
+/// A compact representation of a parachain candidate core's essential information,
+/// used to streamline chunk-fetching tasks. This structure normalizes data from both
+/// occupied and scheduled cores into a unified format containing only the fields
+/// necessary for chunk fetching and validation.
+#[derive(Debug, Clone)]
+struct CoreInfo {
+	/// The candidate hash.
+	candidate_hash: CandidateHash,
+	/// The relay parent of the candidate.
+	relay_parent: Hash,
+	/// The root hash of the erasure coded chunks for the candidate.
+	erasure_root: Hash,
+	/// The group index of the group responsible for the candidate.
+	group_responsible: GroupIndex,
+	/// The origin of the CoreInfo, whether from occupied or scheduled cores.
+	origin: CoreInfoOrigin,
+}
+
+/// Origin of CoreInfo.  Whether it was created by calling prospective parachains for scheduled
+/// candidates, or by querying occupied cores for already backed candidates.
+#[derive(Debug, Clone)]
+enum CoreInfoOrigin {
+	Occupied,
+	Scheduled,
+}	
 
 /// Requester takes care of requesting erasure chunks from backing groups and stores them in the
 /// av store.
@@ -80,6 +111,9 @@ pub struct Requester {
 
 	/// Mapping of the req-response protocols to the full protocol names.
 	req_protocol_names: ReqProtocolNames,
+
+	/// Whether speculative availability requests are enabled.
+	speculative_availability: bool,
 }
 
 #[overseer::contextbounds(AvailabilityDistribution, prefix = self::overseer)]
@@ -91,7 +125,7 @@ impl Requester {
 	///
 	/// You must feed it with `ActiveLeavesUpdate` via `update_fetching_heads` and make it progress
 	/// by advancing the stream.
-	pub fn new(req_protocol_names: ReqProtocolNames, metrics: Metrics) -> Self {
+	pub fn new(req_protocol_names: ReqProtocolNames, metrics: Metrics, speculative_availability: bool) -> Self {
 		let (tx, rx) = mpsc::channel(1);
 		Requester {
 			fetches: HashMap::new(),
@@ -100,6 +134,7 @@ impl Requester {
 			rx,
 			metrics,
 			req_protocol_names,
+			speculative_availability,
 		}
 	}
 
@@ -122,6 +157,55 @@ impl Requester {
 
 		self.stop_requesting_chunks(deactivated.into_iter());
 		Ok(())
+	}
+
+	async fn request_backable_candidates_core_info<Context>(
+		&mut self,
+		ctx: &mut Context,
+		new_head: ActivatedLeaf,
+	) -> Result<Vec<(CoreIndex, CoreInfo)>> {
+		let ActivatedLeaf { hash: leaf, .. } = new_head;
+		let mut scheduled_cores = Vec::new(); 
+		let sender = &mut ctx.sender().clone();
+
+		let cores = recv_runtime(request_availability_cores(leaf, sender).await).await?;
+		let backable = request_backable_candidates(&cores, None, &new_head, sender).await?;
+		gum::trace!(
+			target: LOG_TARGET,
+			leaf_hash=?leaf,
+			"Got {} backable candidates", backable.len()
+		);
+
+		// now get the backed candidates corresponding to these candidate receipts
+		let (tx, rx) = oneshot::channel();
+		sender.send_message(CandidateBackingMessage::GetBackableCandidates(
+			backable.clone(),
+			tx,
+		)).await;
+		let candidates = rx.await?;
+
+		// Process candidates and collect cores
+		for (_, candidates) in candidates.iter() {
+			for candidate in candidates {
+				let (_, core_index) = candidate.validator_indices_and_core_index();
+				let Some(core_index) = core_index else { continue };
+
+				let receipt = candidate.candidate();
+				let core = (
+					core_index,
+					CoreInfo {
+						candidate_hash: receipt.hash(),
+						relay_parent: receipt.descriptor.relay_parent(),
+						erasure_root: receipt.descriptor.erasure_root(),
+						group_responsible: get_group_index_for_backed_candidate(sender, core_index, leaf).await?,
+						origin: CoreInfoOrigin::Scheduled,
+					},
+				);
+				scheduled_cores.push(core);
+			}
+		}
+
+		Ok(scheduled_cores)
 	}
 
 	/// Start requesting chunks for newly imported head.
@@ -152,6 +236,23 @@ impl Requester {
 				occupied_cores = ?cores,
 				"Query occupied core"
 			);
+
+			let cores = cores
+				.into_iter()
+				.map(|(index, occ)| {
+					(
+						index,
+						CoreInfo {
+							candidate_hash: occ.candidate_hash,
+							relay_parent: occ.candidate_descriptor.relay_parent(),
+							erasure_root: occ.candidate_descriptor.erasure_root(),
+							group_responsible: occ.group_responsible,
+							origin: CoreInfoOrigin::Occupied,
+						},
+					)
+				})
+				.collect::<Vec<_>>();
+
 			// Important:
 			// We mark the whole ancestry as live in the **leaf** hash, so we don't need to track
 			// any tasks separately.
@@ -162,6 +263,57 @@ impl Requester {
 			self.add_cores(ctx, runtime, leaf, leaf_session_index, cores).await?;
 		}
 
+		if self.speculative_availability {
+			let scheduled_cores = self.request_backable_candidates_core_info(ctx, new_head).await?;
+			if scheduled_cores.len() > 0 {
+				gum::trace!(
+					target: LOG_TARGET,
+					?scheduled_cores,
+					"Query scheduled cores"
+				);
+
+				let candidate_hashes = scheduled_cores.iter().map(|(_, core_info)| core_info.candidate_hash).collect::<HashSet<_>>();
+				
+				let session_info = self
+					.session_cache
+					.get_session_info(
+						ctx,
+						runtime,
+						// We use leaf here, the relay_parent must be in the same session as
+						// the leaf. This is guaranteed by runtime which ensures that cores are
+						// cleared at session boundaries. At the same time, only leaves are
+						// guaranteed to be fetchable by the state trie.
+						leaf,
+						leaf_session_index,
+					)
+					.await
+					.map_err(|err| {
+						gum::warn!(
+							target: LOG_TARGET,
+							error = ?err,
+							"Failed to spawn a fetch task"
+						);
+						err
+					})?;
+
+				if let Some(session_info) = session_info {
+					let num_validators =
+						session_info.validator_groups.iter().fold(0usize, |mut acc, group| {
+							acc = acc.saturating_add(group.len());
+							acc
+						});
+				
+					let (tx, rx) = oneshot::channel();
+					sender
+						.send_message(
+							AvailabilityStoreMessage::NoteBackableCandidates{ candidate_hashes: candidate_hashes, num_validators, tx },
+						)
+						.await;
+					rx.await?.map_err(|_| Error::AvailabilityStore)?;
+					self.add_cores(ctx, runtime, leaf, leaf_session_index, scheduled_cores).await?;
+				}
+			}
+		}
 		Ok(())
 	}
 
@@ -187,7 +339,7 @@ impl Requester {
 		runtime: &mut RuntimeInfo,
 		leaf: Hash,
 		leaf_session_index: SessionIndex,
-		cores: impl IntoIterator<Item = (CoreIndex, OccupiedCore)>,
+		cores: impl IntoIterator<Item = (CoreIndex, CoreInfo)>,
 	) -> Result<()> {
 		for (core_index, core) in cores {
 			if let Some(e) = self.fetches.get_mut(&core.candidate_hash) {
@@ -346,4 +498,26 @@ where
 		.map_err(FatalError::ChainApiSenderDropped)?
 		.map_err(FatalError::ChainApi)?;
 	Ok(ancestors)
+}
+
+/// Request group index assuming you have the core index and relay parent
+async fn get_group_index_for_backed_candidate<Sender>(
+	sender: &mut Sender,
+	core_index: CoreIndex,
+    relay_parent: Hash,
+) -> Result<GroupIndex>
+where
+    Sender: overseer::SubsystemSender<RuntimeApiMessage> + overseer::SubsystemSender<ChainApiMessage>,
+{
+ 	let (validator_groups, mut rotation_info) = recv_runtime(request_validator_groups(relay_parent, sender).await).await?;
+
+	// Get the block number for the relay_parent to update rotation_info.now
+	let (tx, rx) = oneshot::channel();
+	sender.send_message(ChainApiMessage::BlockHeader(relay_parent, tx)).await;
+	let header = rx.await??;
+	let block_number = header.ok_or_else(|| Error::NoSuchBlockHeader)?.number;
+
+	rotation_info.now = block_number.into(); // Update now to the relay_parent's block number
+
+	Ok(rotation_info.group_for_core(core_index, validator_groups.len()))
 }

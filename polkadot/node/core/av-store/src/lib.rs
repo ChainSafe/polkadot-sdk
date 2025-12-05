@@ -1232,6 +1232,26 @@ fn process_message(
 				},
 			}
 		},
+		AvailabilityStoreMessage::NoteBackableCandidates{ candidate_hashes, num_validators, tx } => {
+			for candidate_hash in candidate_hashes {
+				let res = note_backable_candidate(
+					&subsystem.db,
+					&subsystem.config,
+					candidate_hash,
+					num_validators,
+					subsystem,
+				);
+
+				match res {
+					Ok(_) => {},
+					Err(e) => {
+						let _ = tx.send(Err(()));
+						return Err(e)
+					},
+				}
+			}
+			let _ = tx.send(Ok(()));
+		},
 	}
 
 	Ok(())
@@ -1260,7 +1280,7 @@ fn store_chunk(
 			write_chunk(&mut tx, config, &candidate_hash, validator_index, &chunk);
 			write_meta(&mut tx, config, &candidate_hash, &meta);
 		},
-		None => return Ok(false), // out of bounds.
+		None => return Ok(false) // out of bounds.
 	}
 
 	gum::debug!(
@@ -1400,6 +1420,33 @@ fn prune_all(db: &Arc<dyn Database>, config: &Config, now: Duration) -> Result<(
 				}
 			}
 		}
+	}
+
+	db.write(tx)?;
+	Ok(())
+}
+
+fn note_backable_candidate(
+	db: &Arc<dyn Database>,
+	config: &Config,
+	candidate_hash: CandidateHash,
+	num_validators: usize,
+	subsystem: &AvailabilityStoreSubsystem,
+) -> Result<(), Error> {
+	let mut tx = DBTransaction::new();
+
+	if load_meta(db, config, &candidate_hash)?.is_none() {
+		let now = subsystem.clock.now()?;
+		let meta = CandidateMeta {
+			state: State::Unavailable(now.into()),
+			data_available: false,
+			chunks_stored: bitvec::bitvec![u8, BitOrderLsb0; 0; num_validators],
+		};
+
+		let prune_at = now + KEEP_UNAVAILABLE_FOR;
+
+		write_pruning_key(&mut tx, config, prune_at, &candidate_hash);
+		write_meta(&mut tx, config, &candidate_hash, &meta);
 	}
 
 	db.write(tx)?;

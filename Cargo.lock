@@ -15745,7 +15745,6 @@ dependencies = [
 name = "polkadot-node-core-provisioner"
 version = "7.0.0"
 dependencies = [
- "bitvec",
  "fatality",
  "futures",
  "futures-timer",
@@ -16042,6 +16041,7 @@ name = "polkadot-node-subsystem-util"
 version = "7.0.0"
 dependencies = [
  "assert_matches",
+ "bitvec",
  "fatality",
  "futures",
  "itertools 0.11.0",
