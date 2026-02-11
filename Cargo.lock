@@ -9974,7 +9974,7 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 [[package]]
 name = "litep2p"
 version = "0.13.0"
-source = "git+https://github.com/chainsafe/litep2p?rev=27b110d1dfb6ef279deb7d6a8ddb3a6da292ac0b#27b110d1dfb6ef279deb7d6a8ddb3a6da292ac0b"
+source = "git+https://github.com/chainsafe/litep2p?branch=haiko-real-smoldot-test#7a3d9f062d2ee6c9cae781f63f03abce91928e3d"
 dependencies = [
  "async-trait",
  "bs58",
