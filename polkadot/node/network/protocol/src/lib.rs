@@ -568,6 +568,7 @@ pub mod v3 {
 
 	use polkadot_node_primitives::approval::v2::{
 		CandidateBitfield, IndirectAssignmentCertV2, IndirectSignedApprovalVoteV2,
+		ApprovalTallyLine, SignedApprovalsTally, SignedApprovalsMedians
 	};
 
 	/// This parts of the protocol did not change from v2, so just alias them in v3.
@@ -741,6 +742,13 @@ pub mod v3 {
 		/// Approvals for candidates in some recent, unfinalized block.
 		#[codec(index = 1)]
 		Approvals(Vec<IndirectSignedApprovalVoteV2>),
+
+		// TODO: maybe use a provided Hash
+		#[codec(index = 2)]
+		ApprovalsTallies(SignedApprovalsTally)
+
+		#[codec(index = 3)]
+		ApprovalsMedians(SignedApprovalsMedians)
 	}
 
 	/// Dummy network message type, so we will receive connect/disconnect events.

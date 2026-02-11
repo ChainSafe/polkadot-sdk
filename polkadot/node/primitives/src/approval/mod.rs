@@ -224,11 +224,13 @@ pub mod v2 {
 	pub use sp_consensus_babe::{
 		Randomness, Slot, VrfPreOutput, VrfProof, VrfSignature, VrfTranscript,
 	};
+	use sp_runtime::traits::AppVerify;
 	use std::ops::BitOr;
 
 	use bitvec::{prelude::Lsb0, vec::BitVec};
 	use polkadot_primitives::{
 		CandidateIndex, CoreIndex, Hash, ValidatorIndex, ValidatorSignature,
+		SessionIndex, ValidatorId,
 	};
 
 	/// A static context associated with producing randomness for a core.
@@ -538,6 +540,109 @@ pub mod v2 {
 		pub validator: ValidatorIndex,
 		/// The signature by the validator.
 		pub signature: ValidatorSignature,
+	}
+
+	/// Our subjective record of what we used from some other validator on the finalized chain
+	#[derive(Clone, Copy, Debug, Default, Encode, Decode, Eq, PartialEq)]
+	pub struct ApprovalTallyLine {
+		/// Approvals by this validator which our approvals gadget used in marking candidates approved.
+		pub approval_usages: u32,
+	}
+	
+	/// A signed approvals tally that contains the collected approvals
+	/// usage throughout a given session
+	#[derive(Clone, Debug, Encode, Decode, Eq, PartialEq)]
+	pub struct SignedApprovalsTally {
+		pub session_index: SessionIndex,
+		pub validator_index: ValidatorIndex,
+		pub tallies: Vec<ApprovalTallyLine>,
+		pub signature: Option<ValidatorSignature>,
+	}
+
+	impl SignedApprovalsTally {
+		/// returns a SignedApprovalsTally withouth the signature
+		pub fn unsigned(
+			session_index: SessionIndex,
+			validator_index: ValidatorIndex,
+			tallies: Vec<ApprovalTallyLine>
+		) -> Self {
+			return Self {
+				session_index,
+				validator_index,
+				tallies,
+				signature: None,
+			}
+		}
+
+		/// given a SignedApprovalsTally returns the encoded payload
+		/// to be signed or checked
+		pub fn encode(&self) -> Vec<u8> {
+			const MAGIC: [u8; 4] = *b"APTL";
+			(MAGIC, self.session_index, self.validator_index, self.tallies.clone()).encode()
+		}
+
+		/// given a SignedApprovalsTally checks if the validator
+		/// public key can verify the signature sucessfully
+		pub fn check_signature(
+			&self,
+			validator_public: &ValidatorId,
+			validator_signature: &ValidatorSignature,
+		) -> Result<(), ()> {
+			let payload = self.encode();
+
+			if validator_signature.verify(&payload[..], &validator_public) {
+				Ok(())
+			} else {
+				Err(())
+			}
+		}
+	}
+
+	#[derive(Clone, Debug, Encode, Decode, Eq, PartialEq)]
+	pub struct SignedApprovalsMedian {
+		pub session_index: SessionIndex,
+		pub validator_index: ValidatorIndex,
+		pub medians: Vec<u32>,
+		pub signature: Option<ValidatorSignature>,
+	}
+
+	impl SignedApprovalsMedian {
+		/// returns a SignedApprovalsTally withouth the signature
+		pub fn unsigned(
+			session_index: SessionIndex,
+			validator_index: ValidatorIndex,
+			medians: Vec<u32>
+		) -> Self {
+			return Self {
+				session_index,
+				validator_index,
+				medians,
+				signature: None,
+			}
+		}
+
+		/// given a SignedApprovalsTally returns the encoded payload
+		/// to be signed or checked
+		pub fn encode(&self) -> Vec<u8> {
+			const MAGIC: [u8; 4] = *b"APMD";
+			(MAGIC, self.session_index, self.validator_index, self.medians.clone()).encode()
+		}
+
+		/// given a SignedApprovalsTally checks if the validator
+		/// public key can verify the signature sucessfully
+		pub fn check_signature(
+			&self,
+			validator_public: &ValidatorId,
+			validator_signature: &ValidatorSignature,
+		) -> Result<(), ()> {
+			let payload = self.encode();
+
+			if validator_signature.verify(&payload[..], &validator_public) {
+				Ok(())
+			} else {
+				Err(())
+			}
+		}
 	}
 }
 

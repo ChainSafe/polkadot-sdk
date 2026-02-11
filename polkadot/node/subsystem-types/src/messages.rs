@@ -34,7 +34,7 @@ use polkadot_node_network_protocol::{
 use polkadot_node_primitives::{
 	approval::{
 		v1::{BlockApprovalMeta, DelayTranche},
-		v2::{CandidateBitfield, IndirectAssignmentCertV2, IndirectSignedApprovalVoteV2},
+		v2::{CandidateBitfield, IndirectAssignmentCertV2, IndirectSignedApprovalVoteV2, SignedApprovalsTally},
 	},
 	AvailableData, BabeEpoch, BlockWeight, CandidateVotes, CollationGenerationConfig,
 	CollationSecondedSignal, DisputeMessage, DisputeStatus, ErasureChunk, PoV,
@@ -1236,6 +1236,7 @@ pub enum ApprovalDistributionMessage {
 	),
 	/// Approval checking lag update measured in blocks.
 	ApprovalCheckingLagUpdate(BlockNumber),
+	DistributeUsages(SessionIndex, HashMap<ValidatorIndex, u32>),
 }
 
 /// Message to the Gossip Support subsystem.
