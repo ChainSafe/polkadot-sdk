@@ -88,6 +88,7 @@ pub fn new_full<OverseerGenerator: OverseerGen>(
 		enable_beefy: true,
 		force_authoring_backoff: false,
 		telemetry_worker_handle: None,
+		verbose_approval_metrics: false,
 		node_version: None,
 		secure_validator_mode: false,
 		workers_path,
@@ -103,6 +104,7 @@ pub fn new_full<OverseerGenerator: OverseerGen>(
 		invulnerable_ah_collators: HashSet::new(),
 		collator_protocol_hold_off: None,
 		experimental_collator_protocol: false,
+		collator_reputation_persist_interval: None,
 	};
 
 	match config.network.network_backend {

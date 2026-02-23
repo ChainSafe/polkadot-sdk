@@ -34,6 +34,7 @@ use frame_benchmarking_cli::SUBSTRATE_REFERENCE_HARDWARE;
 use gum::info;
 use mmr_gadget::MmrGadget;
 use polkadot_availability_recovery::FETCH_CHUNKS_THRESHOLD;
+use polkadot_collator_protocol::ReputationConfig;
 use polkadot_node_core_approval_voting::Config as ApprovalVotingConfig;
 use polkadot_node_core_av_store::Config as AvailabilityConfig;
 use polkadot_node_core_candidate_validation::Config as CandidateValidationConfig;
@@ -41,6 +42,7 @@ use polkadot_node_core_chain_selection::{
 	self as chain_selection_subsystem, Config as ChainSelectionConfig,
 };
 use polkadot_node_core_dispute_coordinator::Config as DisputeCoordinatorConfig;
+use polkadot_node_core_rewards_statistics_collector::Config as RewardsStatisticsCollectorConfig;
 use polkadot_node_network_protocol::{
 	peer_set::{PeerSet, PeerSetProtocolNames},
 	request_response::{IncomingRequest, ReqProtocolNames},
@@ -76,6 +78,8 @@ pub struct NewFullParams<OverseerGenerator: OverseerGen> {
 	pub node_version: Option<String>,
 	/// Whether the node is attempting to run as a secure validator.
 	pub secure_validator_mode: bool,
+	/// Whether the node will publish collected approval metrics per validator
+	pub verbose_approval_metrics: bool,
 	/// An optional path to a directory containing the workers.
 	pub workers_path: Option<std::path::PathBuf>,
 	/// Optional custom names for the prepare and execute workers.
@@ -100,6 +104,8 @@ pub struct NewFullParams<OverseerGenerator: OverseerGen> {
 	pub collator_protocol_hold_off: Option<Duration>,
 	/// Use experimental collator protocol
 	pub experimental_collator_protocol: bool,
+	/// Collator reputation persistence interval. If None, defaults to 600 seconds.
+	pub collator_reputation_persist_interval: Option<Duration>,
 }
 
 /// Completely built polkadot node service.
@@ -199,6 +205,7 @@ where
 					telemetry_worker_handle: _,
 					node_version,
 					secure_validator_mode,
+					verbose_approval_metrics,
 					workers_path,
 					workers_names,
 					overseer_gen,
@@ -212,6 +219,7 @@ where
 					invulnerable_ah_collators,
 					collator_protocol_hold_off,
 					experimental_collator_protocol,
+					collator_reputation_persist_interval,
 				},
 			overseer_connector,
 			partial_components:
@@ -424,6 +432,10 @@ where
 				stagnant_check_interval: Default::default(),
 				stagnant_check_mode: chain_selection_subsystem::StagnantCheckMode::PruneOnly,
 			};
+			let reputation_config = ReputationConfig {
+				col_reputation_data: parachains_db::REAL_COLUMNS.col_collator_reputation_data,
+				persist_interval: collator_reputation_persist_interval,
+			};
 
 			// Kusama + testnets get a higher threshold, we are conservative on Polkadot for now.
 			let fetch_chunks_threshold =
@@ -438,6 +450,9 @@ where
 					KEEP_FINALIZED_FOR_LIVE_NETWORKS
 				},
 			};
+
+			let rewards_statistics_collector_config =
+				RewardsStatisticsCollectorConfig { verbose_approval_metrics };
 
 			Some(ExtendedOverseerGenArgs {
 				keystore: keystore_container.local_keystore(),
@@ -455,7 +470,9 @@ where
 				fetch_chunks_threshold,
 				invulnerable_ah_collators,
 				collator_protocol_hold_off,
+				rewards_statistics_collector_config,
 				experimental_collator_protocol,
+				reputation_config,
 			})
 		};
 
@@ -526,7 +543,7 @@ where
 						log::warn!(
 						"⚠️  Starting January 2025 the hardware will fail the minimal physical CPU cores requirements {} for role 'Authority',\n\
 						    find out more when this will become mandatory at:\n\
-						    https://wiki.polkadot.network/docs/maintain-guides-how-to-validate-polkadot#reference-hardware",
+						    https://docs.polkadot.com/infrastructure/running-a-validator/requirements/#minimum-hardware-requirements",
 						err
 					);
 					}
@@ -537,7 +554,7 @@ where
 					{
 						log::warn!(
 						"⚠️  The hardware does not meet the minimal requirements {} for role 'Authority' find out more at:\n\
-						https://wiki.polkadot.network/docs/maintain-guides-how-to-validate-polkadot#reference-hardware",
+						https://docs.polkadot.com/infrastructure/running-a-validator/requirements/#minimum-hardware-requirements",
 						err
 					);
 					}

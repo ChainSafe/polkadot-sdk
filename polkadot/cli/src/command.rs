@@ -279,6 +279,7 @@ where
 				telemetry_worker_handle: None,
 				node_version,
 				secure_validator_mode,
+				verbose_approval_metrics: cli.run.verbose_approval_metrics,
 				workers_path: cli.run.workers_path,
 				workers_names: None,
 				overseer_gen,
@@ -294,6 +295,10 @@ where
 				invulnerable_ah_collators,
 				collator_protocol_hold_off,
 				experimental_collator_protocol,
+				collator_reputation_persist_interval: cli
+					.run
+					.collator_reputation_persist_interval
+					.map(std::time::Duration::from_secs),
 			},
 		)
 		.map(|full| full.task_manager)?;

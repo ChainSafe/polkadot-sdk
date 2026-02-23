@@ -96,6 +96,7 @@ fn main() -> Result<()> {
 						enable_beefy: false,
 						force_authoring_backoff: false,
 						telemetry_worker_handle: None,
+						verbose_approval_metrics: false,
 
 						// Collators don't spawn PVF workers, so we can disable version checks.
 						node_version: None,
@@ -114,6 +115,7 @@ fn main() -> Result<()> {
 						invulnerable_ah_collators: HashSet::new(),
 						collator_protocol_hold_off: None,
 						experimental_collator_protocol: false,
+						collator_reputation_persist_interval: None,
 					},
 				)
 				.map_err(|e| e.to_string())?;

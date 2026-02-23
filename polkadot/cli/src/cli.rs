@@ -167,9 +167,20 @@ pub struct RunCmd {
 	#[arg(long, hide = true)]
 	pub collator_protocol_hold_off: Option<u64>,
 
+	/// Enable or disable per validator collected approvals metrics
+	/// to be published to prometheus. If not specified, set to false.
+	#[arg(long)]
+	pub verbose_approval_metrics: bool,
 	/// Enable experimental collator protocol. TESTING ONLY! Don't use on production
 	#[arg(long, hide = true, default_value = "false")]
 	pub experimental_collator_protocol: bool,
+
+	/// Collator reputation persistence interval in seconds.
+	/// If not specified, defaults to 600 seconds (10 minutes).
+	/// This should be used only with experimental_collator_protocol
+	/// and only on validators.
+	#[arg(long, requires = "experimental_collator_protocol", requires = "validator")]
+	pub collator_reputation_persist_interval: Option<u64>,
 }
 
 #[allow(missing_docs)]
