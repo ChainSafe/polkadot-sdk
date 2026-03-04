@@ -10048,7 +10048,7 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 [[package]]
 name = "litep2p"
 version = "0.13.2"
-source = "git+https://github.com/chainsafe/litep2p?branch=tim/haiko-webrtc-multistream-nego-fix#e333ddccb465cf80824f939aae9706b660bae034"
+source = "git+https://github.com/chainsafe/litep2p?rev=be4c14b79eaf2f1ba069d3a774fb5491714bd5e2#be4c14b79eaf2f1ba069d3a774fb5491714bd5e2"
 dependencies = [
  "async-trait",
  "bs58",

@@ -899,8 +899,7 @@ linked-hash-map = { version = "0.5.4" }
 linked_hash_set = { version = "0.1.4" }
 linregress = { version = "0.5.1" }
 lite-json = { version = "0.2.0", default-features = false }
-#litep2p = { git = "https://github.com/chainsafe/litep2p", rev = "27b110d1dfb6ef279deb7d6a8ddb3a6da292ac0b", features = ["rsa", "websocket", "webrtc"] }
-litep2p = { git = "https://github.com/chainsafe/litep2p", branch = "tim/haiko-webrtc-multistream-nego-fix", features = ["rsa", "websocket", "webrtc"] }
+litep2p = { git = "https://github.com/chainsafe/litep2p", rev = "be4c14b79eaf2f1ba069d3a774fb5491714bd5e2", features = ["rsa", "websocket", "webrtc"] }
 log = { version = "0.4.22", default-features = false }
 macro_magic = { version = "0.5.1" }
 maplit = { version = "1.0.2" }
